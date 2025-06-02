@@ -5,7 +5,7 @@
 This is a mod for the 2004 Crytek game *Far Cry* which makes it possible to experience it in Virtual Reality.
 You need to own and have installed the original Far Cry. It is available at:
 * [Steam](https://store.steampowered.com/app/13520/Far_Cry/)
-* [GOG](https://www.gog.com/en/game/far_cry)
+* [GOG](https://gog.com/en/game/far_cry)
 
 Features:
 - full roomscale 6DOF VR rendering and movement
