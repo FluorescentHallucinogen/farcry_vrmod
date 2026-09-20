@@ -2,7 +2,7 @@ name: Far Cry VR Automated Build
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, dxvk-2.7 ]
     tags: [ 'v*.*.*' ]
 
   workflow_dispatch:
