@@ -67,14 +67,14 @@ jobs:
         run: create_installer.bat
 
       - name: Move 'latest' tag to this commit
-        if: github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dxvk-2.7'
         shell: bash
         run: |
           git tag -f latest
           git push -f origin latest
 
       - name: Update Github dev release
-        if: github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dxvk-2.7'
         uses: softprops/action-gh-release@v3
         with:
           token: "${{ secrets.GITHUB_TOKEN }}"
