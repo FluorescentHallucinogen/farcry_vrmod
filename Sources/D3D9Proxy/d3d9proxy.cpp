@@ -15,6 +15,7 @@
 // environment) or with -MOD:CryVR on the command line. Otherwise every export is forwarded to
 // the system d3d9.dll untouched and the flat game behaves exactly as before.
 //
+// Only Direct3DCreate9 is intercepted; every other export is forwarded by d3d9forward.cpp.
 // Diagnostics go to FarCryVR_d3d9.log next to FarCry.exe (only when active).
 
 #define WIN32_LEAN_AND_MEAN
@@ -23,6 +24,8 @@
 #include <cstdio>
 #include <cstdarg>
 #include <cstring>
+
+#include "d3d9forward.h"
 
 namespace
 {
@@ -247,45 +250,7 @@ namespace
 			adapter, exParams.BackBufferWidth, exParams.BackBufferHeight, exParams.BackBufferFormat, behaviorFlags);
 		return hr;
 	}
-
-	// ---------------------------------------------------------------------------------------------
-	// Forwarders for the d3d9.dll exports we do not care about
-	// ---------------------------------------------------------------------------------------------
-
-	FARPROC g_missingExport = nullptr;
-
-	void __cdecl MissingExport()
-	{
-		// never reached unless the game calls an export the system d3d9.dll lacks
-	}
 }
-
-// d3d9.h declares most of these with their real signatures, so the forwarders get an internal
-// Proxy_ name and are mapped to the exported name in d3d9proxy.def.
-#define FORWARD_EXPORT(name) \
-	static FARPROC pfn_##name = nullptr; \
-	extern "C" __declspec(naked) void Proxy_##name() { __asm { jmp dword ptr [pfn_##name] } }
-
-FORWARD_EXPORT(Direct3DCreate9Ex)
-FORWARD_EXPORT(Direct3DCreate9On12)
-FORWARD_EXPORT(Direct3DCreate9On12Ex)
-FORWARD_EXPORT(Direct3DShaderValidatorCreate9)
-FORWARD_EXPORT(Direct3D9EnableMaximizedWindowedModeShim)
-FORWARD_EXPORT(D3DPERF_BeginEvent)
-FORWARD_EXPORT(D3DPERF_EndEvent)
-FORWARD_EXPORT(D3DPERF_GetStatus)
-FORWARD_EXPORT(D3DPERF_QueryRepeatFrame)
-FORWARD_EXPORT(D3DPERF_SetMarker)
-FORWARD_EXPORT(D3DPERF_SetOptions)
-FORWARD_EXPORT(D3DPERF_SetRegion)
-FORWARD_EXPORT(DebugSetLevel)
-FORWARD_EXPORT(DebugSetMute)
-FORWARD_EXPORT(PSGPError)
-FORWARD_EXPORT(PSGPSampleTexture)
-
-#define RESOLVE_EXPORT(name) \
-	pfn_##name = GetProcAddress(g_systemD3D9, #name); \
-	if (!pfn_##name) pfn_##name = g_missingExport;
 
 // ---------------------------------------------------------------------------------------------
 // Exports
@@ -340,24 +305,8 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID)
 
 		g_systemCreate9 = (PFN_Direct3DCreate9)GetProcAddress(g_systemD3D9, "Direct3DCreate9");
 		g_systemCreate9Ex = (PFN_Direct3DCreate9Ex)GetProcAddress(g_systemD3D9, "Direct3DCreate9Ex");
-		g_missingExport = (FARPROC)&MissingExport;
-
-		RESOLVE_EXPORT(Direct3DCreate9Ex)
-		RESOLVE_EXPORT(Direct3DCreate9On12)
-		RESOLVE_EXPORT(Direct3DCreate9On12Ex)
-		RESOLVE_EXPORT(Direct3DShaderValidatorCreate9)
-		RESOLVE_EXPORT(Direct3D9EnableMaximizedWindowedModeShim)
-		RESOLVE_EXPORT(D3DPERF_BeginEvent)
-		RESOLVE_EXPORT(D3DPERF_EndEvent)
-		RESOLVE_EXPORT(D3DPERF_GetStatus)
-		RESOLVE_EXPORT(D3DPERF_QueryRepeatFrame)
-		RESOLVE_EXPORT(D3DPERF_SetMarker)
-		RESOLVE_EXPORT(D3DPERF_SetOptions)
-		RESOLVE_EXPORT(D3DPERF_SetRegion)
-		RESOLVE_EXPORT(DebugSetLevel)
-		RESOLVE_EXPORT(DebugSetMute)
-		RESOLVE_EXPORT(PSGPError)
-		RESOLVE_EXPORT(PSGPSampleTexture)
+		// everything else is forwarded to the system d3d9.dll untouched (d3d9forward.cpp)
+		ResolveForwardedExports(g_systemD3D9);
 
 		char value[8] = {};
 		if (GetEnvironmentVariableA("FCVR_D3D9EX", value, sizeof(value)) && value[0] == '1')

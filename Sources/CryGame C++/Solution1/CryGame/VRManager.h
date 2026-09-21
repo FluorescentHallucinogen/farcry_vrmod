@@ -8,8 +8,8 @@
 
 class CWeaponClass;
 class CXGame;
-class IDirect3DDevice9Ex;
-class IDirect3DTexture9;
+struct IDirect3DDevice9Ex;
+struct IDirect3DTexture9;
 struct ID3D11Texture2D;
 
 Matrix34 OpenVRToFarCry(const vr::HmdMatrix34_t& mat);

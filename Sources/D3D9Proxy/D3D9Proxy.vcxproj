@@ -81,7 +81,11 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="d3d9forward.cpp" />
     <ClCompile Include="d3d9proxy.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="d3d9forward.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="d3d9proxy.def" />
