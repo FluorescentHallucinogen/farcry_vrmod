@@ -15,6 +15,23 @@
 namespace
 {
 	VRRenderer g_vrRendererImpl;
+
+	typedef IDirect3DDevice9Ex* (*PFN_FarCryVR_GetDevice)();
+
+	// The engine's renderer creates the D3D9 device long before this DLL is loaded, so we cannot hook its creation
+	// ourselves. The Far Cry VR d3d9.dll proxy (Sources/D3D9Proxy) does that for us, turns the device into a D3D9Ex
+	// one and hands it out through this export.
+	IDirect3DDevice9Ex* GetGameDevice()
+	{
+		static PFN_FarCryVR_GetDevice getDevice = nullptr;
+		if (!getDevice)
+		{
+			HMODULE d3d9 = GetModuleHandleA("d3d9.dll");
+			if (d3d9)
+				getDevice = reinterpret_cast<PFN_FarCryVR_GetDevice>(GetProcAddress(d3d9, "FarCryVR_GetDevice"));
+		}
+		return getDevice ? getDevice() : nullptr;
+	}
 }
 
 VRRenderer* gVRRenderer = &g_vrRendererImpl;
@@ -39,10 +56,17 @@ HRESULT __stdcall Hook_D3D9Present(IDirect3DDevice9Ex* pSelf, const RECT* pSourc
 
 HRESULT __stdcall Hook_D3D9Reset(IDirect3DDevice9Ex* pSelf, D3DPRESENT_PARAMETERS* pPresentationParameters)
 {
-	// D3D9 (and dxvk since 2.3) rejects Reset with D3DERR_INVALIDCALL while any D3DPOOL_DEFAULT resource is still alive.
+	// D3D9 rejects Reset with D3DERR_INVALIDCALL while any D3DPOOL_DEFAULT resource is still alive.
 	// The engine resets the device whenever the render resolution changes, so drop our render targets first;
 	// they are recreated on demand by the Capture* functions.
 	gVR->ReleaseDeviceResources();
+
+	// the VR render resolution is no display mode any monitor supports, never let the engine go exclusive fullscreen
+	if (pPresentationParameters && !pPresentationParameters->Windowed)
+	{
+		pPresentationParameters->Windowed = TRUE;
+		pPresentationParameters->FullScreen_RefreshRateInHz = 0;
+	}
 	return hooks::CallOriginal(Hook_D3D9Reset)(pSelf, pPresentationParameters);
 }
 
@@ -58,19 +82,25 @@ void __fastcall Hook_Renderer_SetCamera(IRenderer* pSelf, void* notUsed, const C
 	hooks::CallOriginal(Hook_Renderer_SetCamera)(pSelf, notUsed, cc);
 }
 
-extern "C" {
-  __declspec(dllimport) IDirect3DDevice9Ex* dxvkGetCreatedDevice();
-}
-
 void VRRenderer::Init(CXGame *game)
 {
 	m_pGame = game;
 
-	IDirect3DDevice9Ex* device = dxvkGetCreatedDevice();
+	IDirect3DDevice9Ex* device = GetGameDevice();
 	if (!device)
 	{
-		CryLogAlways("Could not get d3d9 device from dxvk");
+		CryLogAlways("Could not get the D3D9 device from the Far Cry VR d3d9.dll proxy (is the game launched through FarCryVR.exe?)");
 		return;
+	}
+
+	IDirect3DDevice9Ex* deviceEx = nullptr;
+	if (FAILED(device->QueryInterface(__uuidof(IDirect3DDevice9Ex), (void**)&deviceEx)) || !deviceEx)
+	{
+		CryLogAlways("WARNING: the game's D3D9 device is not a D3D9Ex device, VR textures cannot be shared with SteamVR");
+	}
+	else
+	{
+		deviceEx->Release();
 	}
 
 	CryLogAlways("Initializing rendering function hooks");
@@ -88,7 +118,7 @@ void VRRenderer::Render(ISystem* pSystem)
 {
 	m_originalViewCamera = pSystem->GetViewCamera();
 
-	gVR->SetDevice(dxvkGetCreatedDevice());
+	gVR->SetDevice(GetGameDevice());
 	gVR->AwaitFrame();
 
 	if (CPlayer* player = m_pGame->GetLocalPlayer())
@@ -104,7 +134,8 @@ void VRRenderer::Render(ISystem* pSystem)
 	vector2di renderSize = gVR->GetRenderSize();
 	m_pGame->m_pRenderer->SetScissor(0, 0, renderSize.x, renderSize.y);
 	// clear render target to fully transparent for HUD render
-	dxvkGetCreatedDevice()->Clear(0, nullptr, D3DCLEAR_TARGET, D3DCOLOR_ARGB(0, 0, 0, 0), 0, 0);
+	if (IDirect3DDevice9Ex* device = GetGameDevice())
+		device->Clear(0, nullptr, D3DCLEAR_TARGET, D3DCOLOR_ARGB(0, 0, 0, 0), 0, 0);
 
 	if (ShouldRender2D())
 	{
@@ -130,7 +161,8 @@ void VRRenderer::Render(ISystem* pSystem)
 				gVR->CaptureStereo(eye);
 			}
 			// clear render target to fully transparent for HUD render
-			dxvkGetCreatedDevice()->Clear(0, nullptr, D3DCLEAR_TARGET, D3DCOLOR_ARGB(0, 0, 0, 0), 0, 0);
+			if (IDirect3DDevice9Ex* device = GetGameDevice())
+				device->Clear(0, nullptr, D3DCLEAR_TARGET, D3DCOLOR_ARGB(0, 0, 0, 0), 0, 0);
 		}
 		else
 		{

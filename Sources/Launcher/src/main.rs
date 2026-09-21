@@ -19,9 +19,8 @@ fn main() {
     let mut process = Command::new(farcry_exe_path)
         .args(pass_on_args)
         .args(&args)
-        .env("DXVK_ASYNC", "0")
-        .env("DXVK_GPLASYNCCACHE", "0")
-        .env("DXVK_STARTOPENVR", "1")
+        // tells the Far Cry VR d3d9.dll proxy to turn the game's D3D9 device into a D3D9Ex one
+        .env("FCVR_D3D9EX", "1")
         .current_dir(install_dir.join("Bin32"))
         .creation_flags(0x200)
         .spawn()

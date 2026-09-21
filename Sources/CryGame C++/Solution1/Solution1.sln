@@ -4,6 +4,8 @@ VisualStudioVersion = 17.4.33122.133
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "CryGame", "CryGame\CryGame.vcxproj", "{A7EC04A5-D65C-4C45-969C-D842823446ED}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "D3D9Proxy", "..\..\D3D9Proxy\D3D9Proxy.vcxproj", "{5B1E0C6F-2D4A-4F0E-9C7B-3A8D2E6F1A21}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x86 = Debug|x86
@@ -23,6 +25,16 @@ Global
 		{A7EC04A5-D65C-4C45-969C-D842823446ED}.Release|x86.Build.0 = Release|Win32
 		{A7EC04A5-D65C-4C45-969C-D842823446ED}.Release64|x86.ActiveCfg = Release64|Win32
 		{A7EC04A5-D65C-4C45-969C-D842823446ED}.Release64|x86.Build.0 = Release64|Win32
+		{5B1E0C6F-2D4A-4F0E-9C7B-3A8D2E6F1A21}.Debug|x86.ActiveCfg = Debug|Win32
+		{5B1E0C6F-2D4A-4F0E-9C7B-3A8D2E6F1A21}.Debug|x86.Build.0 = Debug|Win32
+		{5B1E0C6F-2D4A-4F0E-9C7B-3A8D2E6F1A21}.Debug64|x86.ActiveCfg = Debug|Win32
+		{5B1E0C6F-2D4A-4F0E-9C7B-3A8D2E6F1A21}.Debug64|x86.Build.0 = Debug|Win32
+		{5B1E0C6F-2D4A-4F0E-9C7B-3A8D2E6F1A21}.Profile|x86.ActiveCfg = Release|Win32
+		{5B1E0C6F-2D4A-4F0E-9C7B-3A8D2E6F1A21}.Profile|x86.Build.0 = Release|Win32
+		{5B1E0C6F-2D4A-4F0E-9C7B-3A8D2E6F1A21}.Release|x86.ActiveCfg = Release|Win32
+		{5B1E0C6F-2D4A-4F0E-9C7B-3A8D2E6F1A21}.Release|x86.Build.0 = Release|Win32
+		{5B1E0C6F-2D4A-4F0E-9C7B-3A8D2E6F1A21}.Release64|x86.ActiveCfg = Release|Win32
+		{5B1E0C6F-2D4A-4F0E-9C7B-3A8D2E6F1A21}.Release64|x86.Build.0 = Release|Win32
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

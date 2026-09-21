@@ -3,10 +3,10 @@
 #include "Cry_Camera.h"
 #include "xplayer.h"
 #include "ComPtr.h"
-#include <vulkan/vulkan.h>
 
-//#include <d3d9_interfaces.h>
 #include <d3d9.h>
+#include <d3d11.h>
+#include <dxgi.h>
 #include <openvr.h>
 
 #include "UISystem.h"
@@ -25,11 +25,6 @@ HMODULE GetCurrentModule()
 
 VRManager s_VRManager;
 VRManager* gVR = &s_VRManager;
-
-extern "C" void dxvkLockSubmissionQueue(IDirect3DDevice9Ex * device, bool flush);
-extern "C" void dxvkReleaseSubmissionQueue(IDirect3DDevice9Ex * device);
-extern "C" HRESULT dxvkFillVulkanTextureInfo(IDirect3DDevice9Ex * device, IDirect3DTexture9 * texture, vr::VRVulkanTextureData_t & data, VkImageLayout & layout);
-extern "C" void dxvkTransitionImageLayout(IDirect3DDevice9Ex * device, IDirect3DTexture9 * texture, VkImageLayout from, VkImageLayout to);
 
 const float BinocularWidth = 0.5f;
 
@@ -74,9 +69,18 @@ vr::HmdMatrix34_t FarCryToOpenVR(const Matrix34& mat)
 struct VRManager::D3DResources
 {
 	ComPtr<IDirect3DDevice9Ex> device;
+	ComPtr<IDirect3DQuery9> flushQuery;
 	ComPtr<IDirect3DTexture9> hudTexture;
 	ComPtr<IDirect3DTexture9> stereoTexture;
 	ComPtr<IDirect3DTexture9> eyeTextures[2];
+
+	// SteamVR only accepts D3D11 (or Vulkan/OpenGL) textures, so every render target above is created as a
+	// shared D3D9Ex surface and opened on this D3D11 device, which lives on the adapter SteamVR asked for.
+	ComPtr<ID3D11Device> device11;
+	ComPtr<ID3D11DeviceContext> context11;
+	ComPtr<ID3D11Texture2D> hudTexture11;
+	ComPtr<ID3D11Texture2D> stereoTexture11;
+	ComPtr<ID3D11Texture2D> eyeTextures11[2];
 };
 
 VRManager::VRManager()
@@ -91,6 +95,8 @@ VRManager::~VRManager()
 	// if Shutdown isn't properly called, we will get an infinite hang when trying to dispose of our D3D resources after
 	// the game already shut down. So just let go here to avoid that
 	m_d3d->device.Detach();
+	m_d3d->context11.Detach();
+	m_d3d->device11.Detach();
 	delete m_d3d;
 }
 
@@ -151,6 +157,9 @@ bool VRManager::Init(CXGame *game)
 
 void VRManager::Shutdown()
 {
+	ReleaseDeviceResources();
+	m_d3d->context11.Reset();
+	m_d3d->device11.Reset();
 	m_d3d->device.Reset();
 
 	if (!m_initialized)
@@ -181,9 +190,7 @@ void VRManager::AwaitFrame()
 	if (!m_initialized || !m_d3d->device)
 		return;
 
-	dxvkLockSubmissionQueue(m_d3d->device.Get(), false);
 	vr::VRCompositor()->WaitGetPoses(&m_headPose, 1, nullptr, 0);
-	dxvkReleaseSubmissionQueue(m_d3d->device.Get());
 
 	UpdateHmdTransform();
 }
@@ -415,17 +422,12 @@ void VRManager::SetDevice(IDirect3DDevice9Ex *device)
 
 void VRManager::FinishFrame()
 {
-	if (!m_initialized || !m_d3d->device || !m_d3d->eyeTextures[0] || !m_d3d->eyeTextures[1])
+	if (!m_initialized || !m_d3d->device || !m_d3d->eyeTextures11[0] || !m_d3d->eyeTextures11[1])
 		return;
 
-	vr::VRVulkanTextureData_t vkTexData[4];
-	VkImageLayout origLayout[4];
-
-	PrepareTextureForSubmission(m_d3d->eyeTextures[0].Get(), vkTexData[0], origLayout[0]);
-	PrepareTextureForSubmission(m_d3d->eyeTextures[1].Get(), vkTexData[1], origLayout[1]);
-	PrepareTextureForSubmission(m_d3d->hudTexture.Get(), vkTexData[2], origLayout[2]);
-	PrepareTextureForSubmission(m_d3d->stereoTexture.Get(), vkTexData[3], origLayout[3]);
-	dxvkLockSubmissionQueue(m_d3d->device.Get(), true);
+	// the eye textures were filled on the D3D9 device; make sure the GPU is done with them before SteamVR
+	// reads them through the D3D11 aliases (D3D9Ex shared surfaces carry no synchronization of their own)
+	FlushRendering();
 
 	for (int eye = 0; eye < 2; ++eye) 
 	{
@@ -434,9 +436,9 @@ void VRManager::FinishFrame()
 		GetEffectiveRenderLimits(eye, &bounds.uMin, &bounds.uMax, &bounds.vMin, &bounds.vMax);
 
 		vr::Texture_t vrTexData;
-		vrTexData.eColorSpace = vr::ColorSpace_Auto;
-		vrTexData.eType = vr::TextureType_Vulkan;
-		vrTexData.handle = &vkTexData[eye];
+		vrTexData.eColorSpace = vr::ColorSpace_Gamma;
+		vrTexData.eType = vr::TextureType_DirectX;
+		vrTexData.handle = m_d3d->eyeTextures11[eye].Get();
 
 		auto error = vr::VRCompositor()->Submit(eye == 0 ? vr::Eye_Left : vr::Eye_Right, &vrTexData, &bounds);
 		if (error != vr::VRCompositorError_None && error != vr::VRCompositorError_AlreadySubmitted)
@@ -445,14 +447,23 @@ void VRManager::FinishFrame()
 		}
 	}
 
-	vr::Texture_t texInfo;
-	texInfo.eColorSpace = vr::ColorSpace_Auto;
-	texInfo.eType = vr::TextureType_Vulkan;
-	texInfo.handle = (void*)&vkTexData[2];
-	vr::VROverlay()->SetOverlayTexture(m_hudOverlay, &texInfo);
+	if (m_d3d->hudTexture11.Get())
+	{
+		vr::Texture_t texInfo;
+		texInfo.eColorSpace = vr::ColorSpace_Gamma;
+		texInfo.eType = vr::TextureType_DirectX;
+		texInfo.handle = m_d3d->hudTexture11.Get();
+		vr::VROverlay()->SetOverlayTexture(m_hudOverlay, &texInfo);
+	}
 
-	texInfo.handle = (void*)&vkTexData[3];
-	vr::VROverlay()->SetOverlayTexture(m_3DOverlay, &texInfo);
+	if (m_d3d->stereoTexture11.Get())
+	{
+		vr::Texture_t texInfo;
+		texInfo.eColorSpace = vr::ColorSpace_Gamma;
+		texInfo.eType = vr::TextureType_DirectX;
+		texInfo.handle = m_d3d->stereoTexture11.Get();
+		vr::VROverlay()->SetOverlayTexture(m_3DOverlay, &texInfo);
+	}
 
 	// apparently we need to set the overlay mouse scale to some values with the proper aspect ratio, otherwise it just won't work
 	vr::HmdVector2_t mouseScale;
@@ -461,12 +472,6 @@ void VRManager::FinishFrame()
 	vr::VROverlay()->SetOverlayMouseScale(m_hudOverlay, &mouseScale);
 
 	vr::VRCompositor()->PostPresentHandoff();
-	dxvkReleaseSubmissionQueue(m_d3d->device.Get());
-
-	PostSubmissionTransitionTexture(m_d3d->eyeTextures[0].Get(), origLayout[0]);
-	PostSubmissionTransitionTexture(m_d3d->eyeTextures[1].Get(), origLayout[1]);
-	PostSubmissionTransitionTexture(m_d3d->hudTexture.Get(), origLayout[2]);
-	PostSubmissionTransitionTexture(m_d3d->stereoTexture.Get(), origLayout[3]);
 
 	m_wasBinocular = m_pGame->AreBinocularsActive();
 }
@@ -1001,6 +1006,12 @@ void VRManager::SetHudAsWeaponZoom()
 
 void VRManager::ReleaseDeviceResources()
 {
+	// the D3D11 aliases only borrow the D3D9Ex surfaces, drop them first
+	m_d3d->hudTexture11.Reset();
+	m_d3d->stereoTexture11.Reset();
+	m_d3d->eyeTextures11[0].Reset();
+	m_d3d->eyeTextures11[1].Reset();
+	m_d3d->flushQuery.Reset();
 	m_d3d->hudTexture.Reset();
 	m_d3d->eyeTextures[0].Reset();
 	m_d3d->eyeTextures[1].Reset();
@@ -1010,66 +1021,119 @@ void VRManager::ReleaseDeviceResources()
 void VRManager::InitDevice(IDirect3DDevice9Ex* device)
 {
 	ReleaseDeviceResources();
+	m_d3d->context11.Reset();
+	m_d3d->device11.Reset();
 
 	CryLogAlways("Acquiring device...");
 	m_d3d->device = device;
+	if (!device)
+		return;
 
-	//VR_InitD3D10DeviceHooks(m_device.Get());
+	// SteamVR tells us which adapter it renders on; the D3D11 device must live there, otherwise Submit rejects
+	// the textures (and the D3D9Ex surfaces could not be opened across adapters anyway)
+	int32_t adapterIndex = -1;
+	if (vr::VRSystem())
+		vr::VRSystem()->GetDXGIOutputInfo(&adapterIndex);
+
+	ComPtr<IDXGIFactory1> factory;
+	ComPtr<IDXGIAdapter1> adapter;
+	if (adapterIndex >= 0 && SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void**)factory.GetAddressOf())))
+	{
+		if (FAILED(factory->EnumAdapters1(adapterIndex, adapter.GetAddressOf())))
+			adapter.Reset();
+	}
+
+	D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0 };
+	D3D_FEATURE_LEVEL level = D3D_FEATURE_LEVEL_10_0;
+	HRESULT hr = D3D11CreateDevice(adapter.Get(), adapter.Get() ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
+		levels, ARRAYSIZE(levels), D3D11_SDK_VERSION, m_d3d->device11.GetAddressOf(), &level, m_d3d->context11.GetAddressOf());
+	if (FAILED(hr))
+	{
+		CryLogAlways("ERROR: D3D11CreateDevice failed: 0x%08x - VR frames cannot be submitted", hr);
+		m_d3d->context11.Reset();
+		m_d3d->device11.Reset();
+		return;
+	}
+	CryLogAlways("Created D3D11 device on adapter %i (feature level 0x%x)", adapterIndex, level);
+}
+
+bool VRManager::CreateSharedRenderTarget(int width, int height, const char* name, IDirect3DTexture9** ppTexture9, ID3D11Texture2D** ppTexture11)
+{
+	*ppTexture9 = nullptr;
+	*ppTexture11 = nullptr;
+	if (!m_d3d->device)
+		return false;
+
+	CryLogAlways("Creating %s texture: %i x %i", name, width, height);
+
+	// a shared handle is only available on D3D9Ex devices, which the Far Cry VR d3d9.dll proxy provides
+	HANDLE sharedHandle = nullptr;
+	ComPtr<IDirect3DTexture9> texture9;
+	HRESULT hr = m_d3d->device->CreateTexture(width, height, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, texture9.GetAddressOf(), &sharedHandle);
+	if (FAILED(hr) || !texture9)
+	{
+		CryLogAlways("ERROR: creating %s texture failed: 0x%08x (is the game running on a D3D9Ex device?)", name, hr);
+		return false;
+	}
+	if (!sharedHandle)
+	{
+		CryLogAlways("ERROR: %s texture was created without a shared handle, it cannot be handed to SteamVR", name);
+		return false;
+	}
+	if (!m_d3d->device11)
+	{
+		CryLogAlways("ERROR: no D3D11 device, %s texture cannot be handed to SteamVR", name);
+		return false;
+	}
+
+	ComPtr<ID3D11Texture2D> texture11;
+	hr = m_d3d->device11->OpenSharedResource(sharedHandle, __uuidof(ID3D11Texture2D), (void**)texture11.GetAddressOf());
+	if (FAILED(hr) || !texture11)
+	{
+		CryLogAlways("ERROR: opening %s texture on the D3D11 device failed: 0x%08x", name, hr);
+		return false;
+	}
+
+	*ppTexture9 = texture9.Detach();
+	*ppTexture11 = texture11.Detach();
+	return true;
+}
+
+void VRManager::FlushRendering()
+{
+	if (!m_d3d->device)
+		return;
+
+	if (!m_d3d->flushQuery)
+		m_d3d->device->CreateQuery(D3DQUERYTYPE_EVENT, m_d3d->flushQuery.GetAddressOf());
+	if (!m_d3d->flushQuery)
+		return;
+
+	m_d3d->flushQuery->Issue(D3DISSUE_END);
+	while (m_d3d->flushQuery->GetData(nullptr, 0, D3DGETDATA_FLUSH) == S_FALSE)
+		SwitchToThread();
 }
 
 void VRManager::CreateEyeTexture(int eye)
 {
-	if (!m_d3d->device)
-		return;
-
 	vector2di size = GetRenderSize();
-	CryLogAlways("Creating eye texture %i: %i x %i", eye, size.x, size.y);
-	HRESULT hr = m_d3d->device->CreateTexture(size.x, size.y, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, m_d3d->eyeTextures[eye].ReleaseAndGetAddressOf(), nullptr);
-	CryLogAlways("CreateTexture2D return code: %i", hr);
+	CreateSharedRenderTarget(size.x, size.y, eye == 0 ? "left eye" : "right eye",
+		m_d3d->eyeTextures[eye].ReleaseAndGetAddressOf(), m_d3d->eyeTextures11[eye].ReleaseAndGetAddressOf());
 }
 
 void VRManager::CreateHUDTexture()
 {
-	if (!m_d3d->device)
-		return;
-
 	vector2di size = GetRenderSize();
-	CryLogAlways("Creating HUD texture: %i x %i", size.x, size.y);
-	HRESULT hr = m_d3d->device->CreateTexture(size.x, size.y, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, m_d3d->hudTexture.ReleaseAndGetAddressOf(), nullptr);
-	CryLogAlways("CreateRenderTarget return code: %i", hr);
+	CreateSharedRenderTarget(size.x, size.y, "HUD",
+		m_d3d->hudTexture.ReleaseAndGetAddressOf(), m_d3d->hudTexture11.ReleaseAndGetAddressOf());
 }
 
 void VRManager::CreateStereoTexture()
 {
-	if (!m_d3d->device)
-		return;
-
 	vector2di size = GetRenderSize();
 	size.x *= 2;
-	CryLogAlways("Creating stereo texture: %i x %i", size.x, size.y);
-	HRESULT hr = m_d3d->device->CreateTexture(size.x, size.y, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, m_d3d->stereoTexture.ReleaseAndGetAddressOf(), nullptr);
-	CryLogAlways("CreateRenderTarget return code: %i", hr);
-}
-
-void VRManager::PrepareTextureForSubmission(IDirect3DTexture9* tex, vr::VRVulkanTextureData_t& vkTexData, VkImageLayout& origLayout)
-{
-	if (!tex)
-		return;
-
-	HRESULT hr = dxvkFillVulkanTextureInfo(m_d3d->device.Get(), tex, vkTexData, origLayout);
-	if (hr != S_OK)
-	{
-		CryLogAlways("Fetching vulkan image info failed: %i", hr);
-	}
-	dxvkTransitionImageLayout(m_d3d->device.Get(), tex, origLayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-}
-
-void VRManager::PostSubmissionTransitionTexture(IDirect3DTexture9* tex, VkImageLayout origLayout)
-{
-	if (!tex)
-		return;
-
-	dxvkTransitionImageLayout(m_d3d->device.Get(), tex, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, origLayout);
+	CreateSharedRenderTarget(size.x, size.y, "stereo",
+		m_d3d->stereoTexture.ReleaseAndGetAddressOf(), m_d3d->stereoTexture11.ReleaseAndGetAddressOf());
 }
 
 void VRManager::RegisterCVars()

@@ -1,0 +1,21 @@
+LIBRARY d3d9
+EXPORTS
+	Direct3DCreate9 = _Direct3DCreate9@4
+	Direct3DCreate9Ex = _Proxy_Direct3DCreate9Ex
+	Direct3DCreate9On12 = _Proxy_Direct3DCreate9On12
+	Direct3DCreate9On12Ex = _Proxy_Direct3DCreate9On12Ex
+	Direct3DShaderValidatorCreate9 = _Proxy_Direct3DShaderValidatorCreate9
+	Direct3D9EnableMaximizedWindowedModeShim = _Proxy_Direct3D9EnableMaximizedWindowedModeShim
+	D3DPERF_BeginEvent = _Proxy_D3DPERF_BeginEvent
+	D3DPERF_EndEvent = _Proxy_D3DPERF_EndEvent
+	D3DPERF_GetStatus = _Proxy_D3DPERF_GetStatus
+	D3DPERF_QueryRepeatFrame = _Proxy_D3DPERF_QueryRepeatFrame
+	D3DPERF_SetMarker = _Proxy_D3DPERF_SetMarker
+	D3DPERF_SetOptions = _Proxy_D3DPERF_SetOptions
+	D3DPERF_SetRegion = _Proxy_D3DPERF_SetRegion
+	DebugSetLevel = _Proxy_DebugSetLevel
+	DebugSetMute = _Proxy_DebugSetMute
+	PSGPError = _Proxy_PSGPError
+	PSGPSampleTexture = _Proxy_PSGPSampleTexture
+	FarCryVR_GetDevice = _FarCryVR_GetDevice
+	FarCryVR_IsActive = _FarCryVR_IsActive

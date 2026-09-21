@@ -23,7 +23,7 @@ copy %DIR%\README.md %DIST%\Mods\CryVR
 copy %DIR%\LICENSE.md %DIST%\Mods\CryVR
 copy %DIR%\EULA.txt %DIST%\Mods\CryVR
 copy %DIR%\Sources\ThirdParty\openvr\bin\win32\openvr_api.dll %DIST%\Bin32\
-copy %DIR%\Sources\ThirdParty\dxvk\bin\d3d9.dll %DIST%\Bin32\
+copy %DIR%\Sources\D3D9Proxy\Release\d3d9.dll %DIST%\Bin32\
 copy %DIR%\Sources\ThirdParty\ffmpeg\bin\*.dll %DIST%\Bin32\
 copy %DIR%\Sources\ThirdParty\bhaptics\bin\win32\haptic_library.dll %DIST%\Bin32\
 copy %DIR%\Sources\ThirdParty\protubevr\ForceTubeVR_API_x32.dll %DIST%\Bin32\

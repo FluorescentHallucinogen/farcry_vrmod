@@ -1,6 +1,5 @@
 #pragma once
 #include <openvr.h>
-#include <vulkan/vulkan_core.h>
 
 #include "VRHaptics.h"
 #include "VRInput.h"
@@ -11,6 +10,7 @@ class CWeaponClass;
 class CXGame;
 class IDirect3DDevice9Ex;
 class IDirect3DTexture9;
+struct ID3D11Texture2D;
 
 Matrix34 OpenVRToFarCry(const vr::HmdMatrix34_t& mat);
 
@@ -101,8 +101,12 @@ private:
 	void CreateHUDTexture();
 	void CreateStereoTexture();
 
-	void PrepareTextureForSubmission(IDirect3DTexture9* tex, vr::VRVulkanTextureData_t& vrTexData, VkImageLayout& origLayout);
-	void PostSubmissionTransitionTexture(IDirect3DTexture9* tex, VkImageLayout origLayout);
+	// Creates a render target on the game's D3D9Ex device and opens it on our D3D11 device, so it can be
+	// handed to SteamVR (which does not speak D3D9). Both pointers are owned by the caller.
+	bool CreateSharedRenderTarget(int width, int height, const char* name, IDirect3DTexture9** ppTexture9, ID3D11Texture2D** ppTexture11);
+	// Waits until the GPU has finished all D3D9 work issued so far, so the shared surfaces can safely be read
+	// through their D3D11 aliases.
+	void FlushRendering();
 
 public:
 	// VR-specific cvars
