@@ -67,6 +67,7 @@ namespace
 	};
 
 	bool g_enabled = true;
+	bool g_shutdown = false;
 	CRITICAL_SECTION g_lock;
 	std::unordered_map<void*, TextureEntry> g_textures;   // key: the SYSTEMMEM texture the game holds
 	std::unordered_map<void*, BufferEntry> g_buffers;     // key: the DEFAULT-pool buffer the game holds
@@ -205,6 +206,8 @@ namespace
 
 	void OnResourceDestroyed(void* key, ResourceKind kind)
 	{
+		if (g_shutdown)
+			return;
 		Guard guard;
 		if (kind == Kind_Texture)
 		{
@@ -227,12 +230,17 @@ namespace
 		}
 	}
 
-	// call with the lock held, never from inside the runtime's destructor of another resource
+	// call with the lock held, never from inside the runtime's destructor of another resource.
+	// Releasing a twin drops its device reference, which re-enters the device's Release hook and
+	// therefore this function, so the list is taken over before anything is released.
 	void ReleasePending()
 	{
-		for (size_t i = 0; i < g_pendingRelease.size(); ++i)
-			g_pendingRelease[i]->Release();
-		g_pendingRelease.clear();
+		if (g_pendingRelease.empty())
+			return;
+		std::vector<IUnknown*> pending;
+		pending.swap(g_pendingRelease);
+		for (size_t i = 0; i < pending.size(); ++i)
+			pending[i]->Release();
 	}
 
 	// ---------------------------------------------------------------------------------------------
@@ -744,8 +752,7 @@ namespace managed
 	IDirect3DBaseTexture9* ResolveTexture(IDirect3DDevice9Ex* device, IDirect3DBaseTexture9* texture)
 	{
 		Guard guard;
-		if (!g_pendingRelease.empty())
-			ReleasePending();
+		ReleasePending();
 
 		std::unordered_map<void*, TextureEntry>::iterator it = g_textures.find(texture);
 		if (it == g_textures.end())
@@ -799,5 +806,23 @@ namespace managed
 		}
 
 		Log("managed: after Reset %u textures are uploaded again on first use, %u buffers were uploaded again (%u uploads so far)", textures, buffers, g_uploads);
+	}
+
+	void ReleaseUnusedTwins()
+	{
+		if (g_shutdown)
+			return;
+		Guard guard;
+		ReleasePending();
+	}
+
+	void Shutdown()
+	{
+		Guard guard;
+		g_shutdown = true;
+		// Whatever is still registered was leaked by the game; at process exit the runtime and the
+		// driver are being torn down, so nothing is released here.
+		Log("managed: unloading with %u textures and %u buffers still alive, %u twins not yet released (%u uploads total)",
+			(unsigned)g_textures.size(), (unsigned)g_buffers.size(), (unsigned)g_pendingRelease.size(), g_uploads);
 	}
 }

@@ -381,6 +381,12 @@ CXGame::~CXGame()
 	SAFE_DELETE(m_pGameMods);
 
 	delete m_pTagPointManager;
+
+	// VR: let go of the D3D device and our render targets while the renderer still exists, otherwise the
+	// device outlives the renderer's shutdown and D3D9 tears it down during process exit, after the display
+	// driver is already gone. Also take the engine hooks out before this DLL is unloaded.
+	gVR->Shutdown();
+	hooks::Shutdown();
 }
 
 //////////////////////////////////////////////////////////////////////

@@ -23,4 +23,12 @@ namespace managed
 
 	// After a successful Reset: DEFAULT-pool contents are not guaranteed to survive it, re-upload.
 	void OnReset(IDirect3DDevice9Ex* device);
+
+	// Twins of managed textures the game already released are let go of lazily (never from inside
+	// the runtime's own destructors). Called before the game's Release of the device, so that the
+	// device can actually be destroyed once the game is done with it.
+	void ReleaseUnusedTwins();
+
+	// The proxy is being unloaded (process exit): stop touching the bookkeeping from now on.
+	void Shutdown();
 }

@@ -114,6 +114,7 @@ namespace
 
 	enum DeviceSlot
 	{
+		DeviceSlot_Release             = 2,
 		DeviceSlot_Reset               = 16,
 		DeviceSlot_CreateTexture       = 23,
 		DeviceSlot_CreateVolumeTexture = 24,
@@ -123,9 +124,11 @@ namespace
 		DeviceSlot_SetTexture          = 65,
 	};
 
+	typedef ULONG (STDMETHODCALLTYPE* PFN_Release)(IDirect3DDevice9Ex* self);
 	typedef HRESULT (STDMETHODCALLTYPE* PFN_Reset)(IDirect3DDevice9Ex* self, D3DPRESENT_PARAMETERS* params);
 	typedef HRESULT (STDMETHODCALLTYPE* PFN_SetTexture)(IDirect3DDevice9Ex* self, DWORD stage, IDirect3DBaseTexture9* texture);
 
+	PFN_Release g_origDeviceRelease = nullptr;
 	PFN_Reset g_origReset = nullptr;
 	PFN_CreateTexture g_origCreateTexture = nullptr;
 	PFN_CreateVolumeTexture g_origCreateVolumeTexture = nullptr;
@@ -133,6 +136,20 @@ namespace
 	PFN_CreateVertexBuffer g_origCreateVertexBuffer = nullptr;
 	PFN_CreateIndexBuffer g_origCreateIndexBuffer = nullptr;
 	PFN_SetTexture g_origSetTexture = nullptr;
+
+	// Twins of released managed textures still hold device references; drop them before the game's
+	// own Release, which may well be its last one, so the device really goes away with it.
+	ULONG STDMETHODCALLTYPE Hook_DeviceRelease(IDirect3DDevice9Ex* self)
+	{
+		managed::ReleaseUnusedTwins();
+		ULONG refs = g_origDeviceRelease(self);
+		if (refs == 0 && self == g_device)
+		{
+			g_device = nullptr;
+			Log("IDirect3DDevice9Ex destroyed");
+		}
+		return refs;
+	}
 
 	HRESULT STDMETHODCALLTYPE Hook_Reset(IDirect3DDevice9Ex* self, D3DPRESENT_PARAMETERS* params)
 	{
@@ -251,6 +268,7 @@ namespace
 
 	void HookDevice(IDirect3DDevice9Ex* device)
 	{
+		PatchVTable(device, DeviceSlot_Release, (void*)&Hook_DeviceRelease, (void**)&g_origDeviceRelease);
 		PatchVTable(device, DeviceSlot_Reset, (void*)&Hook_Reset, (void**)&g_origReset);
 		PatchVTable(device, DeviceSlot_CreateTexture, (void*)&Hook_CreateTexture, (void**)&g_origCreateTexture);
 		PatchVTable(device, DeviceSlot_CreateVolumeTexture, (void*)&Hook_CreateVolumeTexture, (void**)&g_origCreateVolumeTexture);
@@ -379,10 +397,23 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID)
 			}
 		}
 
+		if (g_active)
+		{
+			// The hooks live in the vtables of the runtime's own classes and in the private data of
+			// every emulated resource, so this DLL must stay mapped for as long as the process lives,
+			// even if the renderer DLL that imported it gets unloaded first.
+			HMODULE self = nullptr;
+			if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN, reinterpret_cast<LPCSTR>(&DllMain), &self))
+				Log("Pinning the proxy in memory failed: %lu", GetLastError());
+		}
+
 		Log("Far Cry VR d3d9.dll proxy active, system d3d9.dll loaded from %s", path);
 	}
 	else if (reason == DLL_PROCESS_DETACH)
 	{
+		managed::Shutdown();
+		if (g_device)
+			Log("Proxy unloading while the game's IDirect3DDevice9Ex is still alive (leaked)");
 		if (g_log)
 		{
 			fclose(g_log);

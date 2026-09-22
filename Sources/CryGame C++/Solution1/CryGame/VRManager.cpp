@@ -471,6 +471,12 @@ void VRManager::FinishFrame()
 	mouseScale.v[1] = m_pGame->m_pRenderer->GetHeight();
 	vr::VROverlay()->SetOverlayMouseScale(m_hudOverlay, &mouseScale);
 
+	// SteamVR copies D3D11 overlay textures on our D3D11 context, and nothing else ever flushes that context:
+	// there is no D3D11 swap chain here, and while the game is loading a level no Submit gets through either
+	// (no WaitGetPoses), so without this the loading screen never reaches the headset
+	if (m_d3d->context11.Get())
+		m_d3d->context11->Flush();
+
 	vr::VRCompositor()->PostPresentHandoff();
 
 	m_wasBinocular = m_pGame->AreBinocularsActive();
