@@ -6,17 +6,18 @@
 // renderer creates its device long before the mod's CryGame.dll is loaded, so this has to happen
 // here, on the way into d3d9.dll.
 //
-// 9Ex has no D3DPOOL_MANAGED, so every managed resource the game creates is transparently moved
-// to D3DPOOL_DEFAULT (plus D3DUSAGE_DYNAMIC for textures, so they stay lockable), and the swap
-// chain is forced into windowed mode, since the VR mod runs the game at the headset's render
-// resolution which no monitor can display.
+// 9Ex has no D3DPOOL_MANAGED either, so managed resources are emulated (d3d9managed.cpp: a system
+// memory copy the game works on plus a DEFAULT-pool twin the GPU uses, uploaded again after every
+// Reset), and the swap chain is forced into windowed mode, since the VR mod runs the game at the
+// headset's render resolution which no monitor can display.
 //
 // The proxy is active when the game was started by the FarCryVR launcher (FCVR_D3D9EX=1 in the
 // environment) or with -MOD:CryVR on the command line. Otherwise every export is forwarded to
 // the system d3d9.dll untouched and the flat game behaves exactly as before.
 //
 // Only Direct3DCreate9 is intercepted; every other export is forwarded by d3d9forward.cpp.
-// Diagnostics go to FarCryVR_d3d9.log next to FarCry.exe (only when active).
+// Diagnostics go to FarCryVR_d3d9.log next to FarCry.exe (only when active); FCVR_D3D9EX_LOG=1 logs
+// every resource, FCVR_D3D9EX_MANAGED=0 turns the managed pool emulation off (plain DEFAULT pool).
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -25,7 +26,9 @@
 #include <cstdarg>
 #include <cstring>
 
+#include "d3d9proxy.h"
 #include "d3d9forward.h"
+#include "d3d9managed.h"
 
 namespace
 {
@@ -39,44 +42,52 @@ namespace
 	typedef HRESULT (WINAPI* PFN_Direct3DCreate9Ex)(UINT sdkVersion, IDirect3D9Ex** ppD3D);
 	PFN_Direct3DCreate9 g_systemCreate9 = nullptr;
 	PFN_Direct3DCreate9Ex g_systemCreate9Ex = nullptr;
+}
 
-	void Log(const char* format, ...)
+void Log(const char* format, ...)
+{
+	if (!g_active)
+		return;
+	if (!g_log)
 	{
-		if (!g_active)
-			return;
+		g_log = fopen("FarCryVR_d3d9.log", "w");
 		if (!g_log)
-		{
-			g_log = fopen("FarCryVR_d3d9.log", "w");
-			if (!g_log)
-				return;
-		}
-		va_list args;
-		va_start(args, format);
-		vfprintf(g_log, format, args);
-		va_end(args);
-		fputc('\n', g_log);
-		fflush(g_log);
+			return;
 	}
+	va_list args;
+	va_start(args, format);
+	vfprintf(g_log, format, args);
+	va_end(args);
+	fputc('\n', g_log);
+	fflush(g_log);
+}
 
-	bool PatchVTable(void* object, unsigned index, void* detour, void** original)
-	{
-		void** vtable = *reinterpret_cast<void***>(object);
-		if (vtable[index] == detour)
-			return true;
-
-		DWORD oldProtect = 0;
-		if (!VirtualProtect(&vtable[index], sizeof(void*), PAGE_READWRITE, &oldProtect))
-		{
-			Log("VirtualProtect on vtable slot %u failed: %lu", index, GetLastError());
-			return false;
-		}
-		if (original)
-			*original = vtable[index];
-		vtable[index] = detour;
-		VirtualProtect(&vtable[index], sizeof(void*), oldProtect, &oldProtect);
+bool PatchVTable(void* object, unsigned index, void* detour, void** original)
+{
+	void** vtable = *reinterpret_cast<void***>(object);
+	if (vtable[index] == detour)
 		return true;
-	}
 
+	DWORD oldProtect = 0;
+	if (!VirtualProtect(&vtable[index], sizeof(void*), PAGE_READWRITE, &oldProtect))
+	{
+		Log("VirtualProtect on vtable slot %u failed: %lu", index, GetLastError());
+		return false;
+	}
+	if (original)
+		*original = vtable[index];
+	vtable[index] = detour;
+	VirtualProtect(&vtable[index], sizeof(void*), oldProtect, &oldProtect);
+	return true;
+}
+
+bool Verbose()
+{
+	return g_verbose;
+}
+
+namespace
+{
 	// The VR render resolution is no display mode any monitor supports, and D3D9Ex windowed mode
 	// never loses the device, so the engine is never allowed to go exclusive fullscreen.
 	void ForceWindowed(D3DPRESENT_PARAMETERS& params, const char* where)
@@ -109,14 +120,11 @@ namespace
 		DeviceSlot_CreateCubeTexture   = 25,
 		DeviceSlot_CreateVertexBuffer  = 26,
 		DeviceSlot_CreateIndexBuffer   = 27,
+		DeviceSlot_SetTexture          = 65,
 	};
 
 	typedef HRESULT (STDMETHODCALLTYPE* PFN_Reset)(IDirect3DDevice9Ex* self, D3DPRESENT_PARAMETERS* params);
-	typedef HRESULT (STDMETHODCALLTYPE* PFN_CreateTexture)(IDirect3DDevice9Ex* self, UINT width, UINT height, UINT levels, DWORD usage, D3DFORMAT format, D3DPOOL pool, IDirect3DTexture9** ppTexture, HANDLE* pSharedHandle);
-	typedef HRESULT (STDMETHODCALLTYPE* PFN_CreateVolumeTexture)(IDirect3DDevice9Ex* self, UINT width, UINT height, UINT depth, UINT levels, DWORD usage, D3DFORMAT format, D3DPOOL pool, IDirect3DVolumeTexture9** ppTexture, HANDLE* pSharedHandle);
-	typedef HRESULT (STDMETHODCALLTYPE* PFN_CreateCubeTexture)(IDirect3DDevice9Ex* self, UINT edgeLength, UINT levels, DWORD usage, D3DFORMAT format, D3DPOOL pool, IDirect3DCubeTexture9** ppTexture, HANDLE* pSharedHandle);
-	typedef HRESULT (STDMETHODCALLTYPE* PFN_CreateVertexBuffer)(IDirect3DDevice9Ex* self, UINT length, DWORD usage, DWORD fvf, D3DPOOL pool, IDirect3DVertexBuffer9** ppBuffer, HANDLE* pSharedHandle);
-	typedef HRESULT (STDMETHODCALLTYPE* PFN_CreateIndexBuffer)(IDirect3DDevice9Ex* self, UINT length, DWORD usage, D3DFORMAT format, D3DPOOL pool, IDirect3DIndexBuffer9** ppBuffer, HANDLE* pSharedHandle);
+	typedef HRESULT (STDMETHODCALLTYPE* PFN_SetTexture)(IDirect3DDevice9Ex* self, DWORD stage, IDirect3DBaseTexture9* texture);
 
 	PFN_Reset g_origReset = nullptr;
 	PFN_CreateTexture g_origCreateTexture = nullptr;
@@ -124,6 +132,7 @@ namespace
 	PFN_CreateCubeTexture g_origCreateCubeTexture = nullptr;
 	PFN_CreateVertexBuffer g_origCreateVertexBuffer = nullptr;
 	PFN_CreateIndexBuffer g_origCreateIndexBuffer = nullptr;
+	PFN_SetTexture g_origSetTexture = nullptr;
 
 	HRESULT STDMETHODCALLTYPE Hook_Reset(IDirect3DDevice9Ex* self, D3DPRESENT_PARAMETERS* params)
 	{
@@ -131,26 +140,36 @@ namespace
 			ForceWindowed(*params, "Reset");
 		HRESULT hr = g_origReset(self, params);
 		if (FAILED(hr))
+		{
 			Log("Reset failed: 0x%08lx", hr);
-		else if (params)
+			return hr;
+		}
+		if (params)
 			Log("Reset: %ux%u", params->BackBufferWidth, params->BackBufferHeight);
+		// the contents of DEFAULT-pool resources are not guaranteed to survive a Reset
+		managed::OnReset(self);
 		return hr;
 	}
 
-	// D3D9Ex rejects D3DPOOL_MANAGED. Keep such textures in VRAM but lockable, so the engine can
-	// still upload into them; drivers may refuse DYNAMIC for some formats, so retry without it.
+	// D3D9Ex rejects D3DPOOL_MANAGED. Managed resources are emulated in d3d9managed.cpp (a system
+	// memory copy the game works on plus a DEFAULT-pool twin the GPU uses). Should that fail for a
+	// resource, it is created in the DEFAULT pool directly; such a texture gets D3DUSAGE_DYNAMIC to
+	// stay lockable, and its contents do not survive a Reset.
 	HRESULT STDMETHODCALLTYPE Hook_CreateTexture(IDirect3DDevice9Ex* self, UINT width, UINT height, UINT levels, DWORD usage, D3DFORMAT format, D3DPOOL pool, IDirect3DTexture9** ppTexture, HANDLE* pSharedHandle)
 	{
 		if (pool != D3DPOOL_MANAGED)
 			return g_origCreateTexture(self, width, height, levels, usage, format, pool, ppTexture, pSharedHandle);
+
+		if (managed::Enabled() && ppTexture && SUCCEEDED(managed::CreateTexture(self, g_origCreateTexture, width, height, levels, usage, format, ppTexture)))
+			return D3D_OK;
 
 		HRESULT hr = g_origCreateTexture(self, width, height, levels, usage | D3DUSAGE_DYNAMIC, format, D3DPOOL_DEFAULT, ppTexture, pSharedHandle);
 		if (FAILED(hr))
 			hr = g_origCreateTexture(self, width, height, levels, usage, format, D3DPOOL_DEFAULT, ppTexture, pSharedHandle);
 		if (FAILED(hr))
 			Log("CreateTexture %ux%u levels %u usage 0x%lx format %d: MANAGED -> DEFAULT failed: 0x%08lx", width, height, levels, usage, format, hr);
-		else if (g_verbose)
-			Log("CreateTexture %ux%u levels %u usage 0x%lx format %d: MANAGED -> DEFAULT", width, height, levels, usage, format);
+		else
+			Log("CreateTexture %ux%u levels %u usage 0x%lx format %d: MANAGED -> DEFAULT without a system copy", width, height, levels, usage, format);
 		return hr;
 	}
 
@@ -159,11 +178,16 @@ namespace
 		if (pool != D3DPOOL_MANAGED)
 			return g_origCreateVolumeTexture(self, width, height, depth, levels, usage, format, pool, ppTexture, pSharedHandle);
 
+		if (managed::Enabled() && ppTexture && SUCCEEDED(managed::CreateVolumeTexture(self, g_origCreateVolumeTexture, width, height, depth, levels, usage, format, ppTexture)))
+			return D3D_OK;
+
 		HRESULT hr = g_origCreateVolumeTexture(self, width, height, depth, levels, usage | D3DUSAGE_DYNAMIC, format, D3DPOOL_DEFAULT, ppTexture, pSharedHandle);
 		if (FAILED(hr))
 			hr = g_origCreateVolumeTexture(self, width, height, depth, levels, usage, format, D3DPOOL_DEFAULT, ppTexture, pSharedHandle);
 		if (FAILED(hr))
 			Log("CreateVolumeTexture %ux%ux%u levels %u usage 0x%lx format %d: MANAGED -> DEFAULT failed: 0x%08lx", width, height, depth, levels, usage, format, hr);
+		else
+			Log("CreateVolumeTexture %ux%ux%u levels %u usage 0x%lx format %d: MANAGED -> DEFAULT without a system copy", width, height, depth, levels, usage, format);
 		return hr;
 	}
 
@@ -172,34 +196,57 @@ namespace
 		if (pool != D3DPOOL_MANAGED)
 			return g_origCreateCubeTexture(self, edgeLength, levels, usage, format, pool, ppTexture, pSharedHandle);
 
+		if (managed::Enabled() && ppTexture && SUCCEEDED(managed::CreateCubeTexture(self, g_origCreateCubeTexture, edgeLength, levels, usage, format, ppTexture)))
+			return D3D_OK;
+
 		HRESULT hr = g_origCreateCubeTexture(self, edgeLength, levels, usage | D3DUSAGE_DYNAMIC, format, D3DPOOL_DEFAULT, ppTexture, pSharedHandle);
 		if (FAILED(hr))
 			hr = g_origCreateCubeTexture(self, edgeLength, levels, usage, format, D3DPOOL_DEFAULT, ppTexture, pSharedHandle);
 		if (FAILED(hr))
 			Log("CreateCubeTexture %u levels %u usage 0x%lx format %d: MANAGED -> DEFAULT failed: 0x%08lx", edgeLength, levels, usage, format, hr);
+		else
+			Log("CreateCubeTexture %u levels %u usage 0x%lx format %d: MANAGED -> DEFAULT without a system copy", edgeLength, levels, usage, format);
 		return hr;
 	}
 
-	// Buffers in DEFAULT pool stay lockable without DYNAMIC (just slower to lock), and managed
-	// buffers are never locked with DISCARD/NOOVERWRITE, so their usage flags can stay as they are.
 	HRESULT STDMETHODCALLTYPE Hook_CreateVertexBuffer(IDirect3DDevice9Ex* self, UINT length, DWORD usage, DWORD fvf, D3DPOOL pool, IDirect3DVertexBuffer9** ppBuffer, HANDLE* pSharedHandle)
 	{
-		if (pool == D3DPOOL_MANAGED)
-			pool = D3DPOOL_DEFAULT;
-		HRESULT hr = g_origCreateVertexBuffer(self, length, usage, fvf, pool, ppBuffer, pSharedHandle);
+		if (pool != D3DPOOL_MANAGED)
+			return g_origCreateVertexBuffer(self, length, usage, fvf, pool, ppBuffer, pSharedHandle);
+
+		if (managed::Enabled() && ppBuffer && SUCCEEDED(managed::CreateVertexBuffer(self, g_origCreateVertexBuffer, length, usage, fvf, ppBuffer)))
+			return D3D_OK;
+
+		HRESULT hr = g_origCreateVertexBuffer(self, length, usage, fvf, D3DPOOL_DEFAULT, ppBuffer, pSharedHandle);
 		if (FAILED(hr))
-			Log("CreateVertexBuffer %u bytes usage 0x%lx pool %d failed: 0x%08lx", length, usage, pool, hr);
+			Log("CreateVertexBuffer %u bytes usage 0x%lx: MANAGED -> DEFAULT failed: 0x%08lx", length, usage, hr);
+		else
+			Log("CreateVertexBuffer %u bytes usage 0x%lx: MANAGED -> DEFAULT without a system copy", length, usage);
 		return hr;
 	}
 
 	HRESULT STDMETHODCALLTYPE Hook_CreateIndexBuffer(IDirect3DDevice9Ex* self, UINT length, DWORD usage, D3DFORMAT format, D3DPOOL pool, IDirect3DIndexBuffer9** ppBuffer, HANDLE* pSharedHandle)
 	{
-		if (pool == D3DPOOL_MANAGED)
-			pool = D3DPOOL_DEFAULT;
-		HRESULT hr = g_origCreateIndexBuffer(self, length, usage, format, pool, ppBuffer, pSharedHandle);
+		if (pool != D3DPOOL_MANAGED)
+			return g_origCreateIndexBuffer(self, length, usage, format, pool, ppBuffer, pSharedHandle);
+
+		if (managed::Enabled() && ppBuffer && SUCCEEDED(managed::CreateIndexBuffer(self, g_origCreateIndexBuffer, length, usage, format, ppBuffer)))
+			return D3D_OK;
+
+		HRESULT hr = g_origCreateIndexBuffer(self, length, usage, format, D3DPOOL_DEFAULT, ppBuffer, pSharedHandle);
 		if (FAILED(hr))
-			Log("CreateIndexBuffer %u bytes usage 0x%lx pool %d failed: 0x%08lx", length, usage, pool, hr);
+			Log("CreateIndexBuffer %u bytes usage 0x%lx format %d: MANAGED -> DEFAULT failed: 0x%08lx", length, usage, format, hr);
+		else
+			Log("CreateIndexBuffer %u bytes usage 0x%lx format %d: MANAGED -> DEFAULT without a system copy", length, usage, format);
 		return hr;
+	}
+
+	// The GPU never samples the system copy of an emulated managed texture; bind its twin instead.
+	HRESULT STDMETHODCALLTYPE Hook_SetTexture(IDirect3DDevice9Ex* self, DWORD stage, IDirect3DBaseTexture9* texture)
+	{
+		if (texture)
+			texture = managed::ResolveTexture(self, texture);
+		return g_origSetTexture(self, stage, texture);
 	}
 
 	void HookDevice(IDirect3DDevice9Ex* device)
@@ -210,6 +257,7 @@ namespace
 		PatchVTable(device, DeviceSlot_CreateCubeTexture, (void*)&Hook_CreateCubeTexture, (void**)&g_origCreateCubeTexture);
 		PatchVTable(device, DeviceSlot_CreateVertexBuffer, (void*)&Hook_CreateVertexBuffer, (void**)&g_origCreateVertexBuffer);
 		PatchVTable(device, DeviceSlot_CreateIndexBuffer, (void*)&Hook_CreateIndexBuffer, (void**)&g_origCreateIndexBuffer);
+		PatchVTable(device, DeviceSlot_SetTexture, (void*)&Hook_SetTexture, (void**)&g_origSetTexture);
 	}
 
 	// ---------------------------------------------------------------------------------------------
@@ -293,6 +341,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID)
 	if (reason == DLL_PROCESS_ATTACH)
 	{
 		DisableThreadLibraryCalls(instance);
+		managed::Initialize();
 
 		char path[MAX_PATH];
 		UINT length = GetSystemDirectoryA(path, MAX_PATH);
@@ -313,6 +362,8 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID)
 			g_active = true;
 		if (GetEnvironmentVariableA("FCVR_D3D9EX_LOG", value, sizeof(value)) && value[0] == '1')
 			g_verbose = true;
+		if (GetEnvironmentVariableA("FCVR_D3D9EX_MANAGED", value, sizeof(value)) && value[0] == '0')
+			managed::SetEnabled(false);
 
 		if (!g_active)
 		{

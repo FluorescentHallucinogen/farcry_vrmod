@@ -82,10 +82,13 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="d3d9forward.cpp" />
+    <ClCompile Include="d3d9managed.cpp" />
     <ClCompile Include="d3d9proxy.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="d3d9forward.h" />
+    <ClInclude Include="d3d9managed.h" />
+    <ClInclude Include="d3d9proxy.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="d3d9proxy.def" />
