@@ -1,6 +1,5 @@
 #pragma once
-#include <openvr.h>
-
+#include "VROpenXR.h"
 #include "VRHaptics.h"
 #include "VRInput.h"
 
@@ -12,7 +11,9 @@ struct IDirect3DDevice9Ex;
 struct IDirect3DTexture9;
 struct ID3D11Texture2D;
 
-Matrix34 OpenVRToFarCry(const vr::HmdMatrix34_t& mat);
+// OpenXR (like OpenVR): x = right, y = up, -z = forward; FarCry: x = left, -y = forward, z = up
+Matrix34 XrPoseToFarCry(const XrPosef& pose);
+XrPosef FarCryToXrPose(const Matrix34& mat);
 
 class VRManager
 {
@@ -75,21 +76,47 @@ public:
 private:
 	struct D3DResources;
 
+	// where the HUD quad (menu, ingame HUD, binoculars, weapon scope) is shown this frame
+	struct HudPlacement
+	{
+		bool headLocked = true;      // pose relative to the head instead of the tracking space
+		XrPosef pose;                // quad center, +Z towards the viewer
+		float width = 2.0f;          // meters
+		bool opaque = false;         // ignore the texture's alpha
+	};
+
 	CXGame* m_pGame;
 	bool m_initialized = false;
 	bool m_inputReady = false;
 	D3DResources* m_d3d = nullptr;
-	vr::TrackedDevicePose_t m_headPose;
-	vr::VROverlayHandle_t m_hudOverlay;
-	vr::VROverlayHandle_t m_3DOverlay;
-	float m_verticalFov;
+	VROpenXR m_xr;
+	XrPosef m_headPoseXr;          // raw head pose in the OpenXR stage space, from the last AwaitFrame
+	bool m_headPoseValid = false;
+	bool m_recalibratePending = false;
+	float m_verticalFov;           // tangents of the half angles the eyes are rendered with (symmetric)
 	float m_horizontalFov;
 	float m_vertRenderScale;
 	float m_horzRenderScale;
+	bool m_fovKnown = false;
 	float m_prevViewYaw = 0;
 
 	int m_curWindowWidth = 0;
 	int m_curWindowHeight = 0;
+
+	HudPlacement m_hud;
+	bool m_stereoVisible = false;  // show the side-by-side 3D cinema quads (same placement as the HUD)
+
+	// menu pointer: a ray from the pointing hand hits the menu quad and moves the mouse cursor there
+	int m_pointerHand = 1;
+	bool m_pointerVisible = false;
+	bool m_pointerValid = false;
+	float m_pointerU = 0.5f;       // cursor on the menu quad, 0..1 from the left / from the top
+	float m_pointerV = 0.5f;
+	XrVector3f m_pointerHit;       // where the ray meets the menu quad (stage space)
+	bool m_menuTriggerDown[2] = {};
+	bool m_menuClickDown = false;
+	bool m_menuAnyButtonDown = false;
+	float m_lastStandaloneFrameTime = 0;   // last frame submitted without VRRenderer (loading screens)
 
 	void SetHudAttachedToHead();
 	void SetHudInFrontOfPlayer();
@@ -101,12 +128,19 @@ private:
 	void CreateHUDTexture();
 	void CreateStereoTexture();
 
-	// Creates a render target on the game's D3D9Ex device and opens it on our D3D11 device, so it can be
-	// handed to SteamVR (which does not speak D3D9). Both pointers are owned by the caller.
+	// Creates a render target on the game's D3D9Ex device and opens it on the D3D11 device the OpenXR
+	// session runs on, so its contents can be copied into the runtime's swapchains. Both pointers are
+	// owned by the caller.
 	bool CreateSharedRenderTarget(int width, int height, const char* name, IDirect3DTexture9** ppTexture9, ID3D11Texture2D** ppTexture11);
 	// Waits until the GPU has finished all D3D9 work issued so far, so the shared surfaces can safely be read
 	// through their D3D11 aliases.
 	void FlushRendering();
+
+	void UpdateFovFromRuntime();
+	void UpdateMenuPointer();
+	bool BuildBeamQuad(const XrVector3f& from, const XrVector3f& to, float width, const XrVector3f& eye, VROpenXR::QuadLayer& quad);
+	bool BuildFaceQuad(const XrVector3f& center, const XrVector3f& x, const XrVector3f& y, const XrVector3f& normal, float w, float h, const XrVector3f& eye, VROpenXR::QuadLayer& quad);
+	int BuildPointerQuads(VROpenXR::QuadLayer* quads, int maxQuads);
 
 public:
 	// VR-specific cvars
@@ -142,6 +176,8 @@ public:
 	float vr_menu_width;
 	int vr_skip_vehicle_transitions;
 	int vr_decouple_vehicle_rotations;
+	int vr_vehicle_alt_controls;
+	int vr_menu_pointer;
 	ICVar* vr_debug_override_rh_offset = nullptr;
 	ICVar* vr_debug_override_rh_angles = nullptr;
 	ICVar* vr_debug_override_lh_offset = nullptr;

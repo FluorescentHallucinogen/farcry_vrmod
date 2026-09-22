@@ -822,7 +822,7 @@ namespace managed
 		g_shutdown = true;
 		// Whatever is still registered was leaked by the game; at process exit the runtime and the
 		// driver are being torn down, so nothing is released here.
-		Log("managed: unloading with %u textures and %u buffers still alive, %u twins not yet released (%u uploads total)",
+		Log("managed: unloading; the game never released %u managed textures and %u buffers (normal for Far Cry), %u twins pending (%u uploads total)",
 			(unsigned)g_textures.size(), (unsigned)g_buffers.size(), (unsigned)g_pendingRelease.size(), g_uploads);
 	}
 }

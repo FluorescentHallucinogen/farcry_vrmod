@@ -39,3 +39,7 @@ Release64
 x64
 dist
 installer/assembly
+
+# the OpenXR loader shipped with the mod (Sources/ThirdParty/openxr)
+!Sources/ThirdParty/openxr/bin/win32/openxr_loader.dll
+!Sources/ThirdParty/openxr/lib/win32/openxr_loader.lib

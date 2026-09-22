@@ -96,7 +96,7 @@ void VRRenderer::Init(CXGame *game)
 	IDirect3DDevice9Ex* deviceEx = nullptr;
 	if (FAILED(device->QueryInterface(__uuidof(IDirect3DDevice9Ex), (void**)&deviceEx)) || !deviceEx)
 	{
-		CryLogAlways("WARNING: the game's D3D9 device is not a D3D9Ex device, VR textures cannot be shared with SteamVR");
+		CryLogAlways("WARNING: the game's D3D9 device is not a D3D9Ex device, VR textures cannot be shared with OpenXR");
 	}
 	else
 	{
