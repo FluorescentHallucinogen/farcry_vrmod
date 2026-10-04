@@ -1,0 +1,585 @@
+From 5dc65bb4f5cadbf6a1982dfcf6275aca5ffb0b74 Mon Sep 17 00:00:00 2001
+From: Alexey Rodionov <fluorescent.hallucinogen@gmail.com>
+Date: Sun, 4 Oct 2026 12:22:48 +0000
+Subject: [PATCH] [dxvk] Ask the OpenXR runtime for Vulkan extensions on
+ Windows too
+
+The OpenXR extension provider only knew wineopenxr.dll. On Windows, load the
+OpenXR loader the application ships next to its executable (openxr_loader.dll),
+create a throwaway XrInstance with XR_KHR_vulkan_enable, let the active runtime
+name the Vulkan instance and device extensions it needs, and destroy the
+instance again before the application creates its own. Extensions the loader /
+GPU do not offer are dropped instead of failing vkCreate{Instance,Device}.
+
+This is what the OpenVR provider does through openvr_api.dll; VR mods that
+moved from OpenVR to OpenXR (Far Cry VR) no longer get their external memory /
+semaphore / fence extensions from SteamVR's compositor, and without them the
+OpenXR session on dxvk's device cannot be created. DXVK_OPENXR=0 turns the
+Windows path off.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01TWsKJPmuvTXK3Vo9GTKHQd
+---
+ src/dxvk/dxvk_openxr.cpp | 366 ++++++++++++++++++++++++++++++++++++---
+ src/dxvk/dxvk_openxr.h   |  39 ++++-
+ 2 files changed, 370 insertions(+), 35 deletions(-)
+
+diff --git a/src/dxvk/dxvk_openxr.cpp b/src/dxvk/dxvk_openxr.cpp
+index 9b304d81..d4938c60 100644
+--- a/src/dxvk/dxvk_openxr.cpp
++++ b/src/dxvk/dxvk_openxr.cpp
+@@ -1,6 +1,15 @@
++#include <cstring>
++#include <sstream>
++
+ #include "dxvk_instance.h"
+ #include "dxvk_openxr.h"
+ 
++#include "../util/util_env.h"
++
++#ifndef LOAD_LIBRARY_SEARCH_APPLICATION_DIR
++#define LOAD_LIBRARY_SEARCH_APPLICATION_DIR 0x00000200
++#endif
++
+ #ifdef __GNUC__
+ #pragma GCC diagnostic ignored "-Wnon-virtual-dtor"
+ #endif
+@@ -9,15 +18,70 @@ using PFN___wineopenxr_GetVulkanInstanceExtensions = int (WINAPI *)(uint32_t, ui
+ using PFN___wineopenxr_GetVulkanDeviceExtensions = int (WINAPI *)(uint32_t, uint32_t *, char *);
+ 
+ namespace dxvk {
+-  
++
+   struct WineXrFunctions {
+     PFN___wineopenxr_GetVulkanInstanceExtensions __wineopenxr_GetVulkanInstanceExtensions = nullptr;
+     PFN___wineopenxr_GetVulkanDeviceExtensions __wineopenxr_GetVulkanDeviceExtensions = nullptr;
+   };
+-  
++
+   WineXrFunctions g_winexrFunctions;
+   DxvkXrProvider DxvkXrProvider::s_instance;
+ 
++
++  // Just enough of the OpenXR API to ask the active runtime which Vulkan extensions it needs.
++  // Mirrors openxr.h (handles are 64 bits wide on every platform, entry points are XRAPI_CALL
++  // = __stdcall on 32-bit Windows); kept here so that DXVK does not depend on the OpenXR SDK.
++  namespace oxr {
++
++    using XrInstance   = uint64_t;
++    using XrSystemId   = uint64_t;
++    using XrVersion    = uint64_t;
++    using XrFlags64    = uint64_t;
++    using XrResult     = int32_t;
++    using XrStructureType = int32_t;
++    using XrFormFactor = int32_t;
++
++    constexpr XrResult        XR_SUCCESS                           = 0;
++    constexpr XrStructureType XR_TYPE_INSTANCE_CREATE_INFO         = 3;
++    constexpr XrStructureType XR_TYPE_SYSTEM_GET_INFO              = 4;
++    constexpr XrFormFactor    XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY  = 1;
++    constexpr XrVersion       XR_API_VERSION_1_0                   = (uint64_t(1) << 48) | (uint64_t(0) << 32) | 0;
++
++    struct XrApplicationInfo {
++      char      applicationName[128];
++      uint32_t  applicationVersion;
++      char      engineName[128];
++      uint32_t  engineVersion;
++      XrVersion apiVersion;
++    };
++
++    struct XrInstanceCreateInfo {
++      XrStructureType     type;
++      const void*         next;
++      XrFlags64           createFlags;
++      XrApplicationInfo   applicationInfo;
++      uint32_t            enabledApiLayerCount;
++      const char* const*  enabledApiLayerNames;
++      uint32_t            enabledExtensionCount;
++      const char* const*  enabledExtensionNames;
++    };
++
++    struct XrSystemGetInfo {
++      XrStructureType     type;
++      const void*         next;
++      XrFormFactor        formFactor;
++    };
++
++    using PFN_xrVoidFunction        = void (WINAPI *)();
++    using PFN_xrGetInstanceProcAddr = XrResult (WINAPI *)(XrInstance, const char*, PFN_xrVoidFunction*);
++    using PFN_xrCreateInstance      = XrResult (WINAPI *)(const XrInstanceCreateInfo*, XrInstance*);
++    using PFN_xrDestroyInstance     = XrResult (WINAPI *)(XrInstance);
++    using PFN_xrGetSystem           = XrResult (WINAPI *)(XrInstance, const XrSystemGetInfo*, XrSystemId*);
++    using PFN_xrGetVulkanExtensions = XrResult (WINAPI *)(XrInstance, XrSystemId, uint32_t, uint32_t*, char*);
++
++  }
++
++
+   DxvkXrProvider:: DxvkXrProvider() { }
+ 
+   DxvkXrProvider::~DxvkXrProvider() { }
+@@ -26,8 +90,8 @@ namespace dxvk {
+   std::string_view DxvkXrProvider::getName() {
+     return "OpenXR";
+   }
+-  
+-  
++
++
+   DxvkExtensionList DxvkXrProvider::getInstanceExtensions() {
+     std::lock_guard<dxvk::mutex> lock(m_mutex);
+     return m_insExtensions;
+@@ -36,6 +100,10 @@ namespace dxvk {
+ 
+   DxvkExtensionList DxvkXrProvider::getDeviceExtensions(uint32_t adapterId) {
+     std::lock_guard<dxvk::mutex> lock(m_mutex);
++
++    if (adapterId < m_devExtensionsPerAdapter.size())
++      return m_devExtensionsPerAdapter[adapterId];
++
+     return m_devExtensions;
+   }
+ 
+@@ -43,18 +111,54 @@ namespace dxvk {
+   void DxvkXrProvider::initInstanceExtensions() {
+     std::lock_guard<dxvk::mutex> lock(m_mutex);
+ 
++    if (m_initializedInsExt)
++      return;
++
++    // Wine: wineopenxr.dll hands the lists out directly
+     if (!m_wineOxr)
+       m_wineOxr = this->loadLibrary();
+ 
+-    if (!m_wineOxr || m_initializedInsExt)
++    if (m_wineOxr) {
++      if (!this->loadFunctions()) {
++        this->shutdown();
++        return;
++      }
++
++      m_insExtensions = this->queryInstanceExtensions();
++      m_initializedInsExt = true;
+       return;
++    }
+ 
+-    if (!this->loadFunctions()) {
+-      this->shutdown();
++    // Windows: ask the OpenXR runtime through the loader, if the application ships one
++    if (env::getEnvVar("DXVK_OPENXR") == "0") {
++      Logger::info("OpenXR: Disabled by DXVK_OPENXR=0");
++      m_initializedInsExt = true;
++      return;
++    }
++
++    if (!m_oxrLoader)
++      m_oxrLoader = this->loadNativeLoader();
++
++    if (!m_oxrLoader) {
++      Logger::info("OpenXR: Failed to locate module");
++      m_initializedInsExt = true;
+       return;
+     }
+ 
+-    m_insExtensions = this->queryInstanceExtensions();
++    if (this->queryNativeRuntime()) {
++      m_insExtensions = this->filterSupportedInstanceExtensions(m_insExtensions);
++
++      Logger::info("OpenXR: Instance extensions requested by the runtime:");
++      for (const auto& ext : m_insExtensions)
++        Logger::info(str::format("  ", ext.extensionName));
++
++      Logger::info("OpenXR: Device extensions requested by the runtime:");
++      for (const auto& ext : m_devExtensions)
++        Logger::info(str::format("  ", ext.extensionName));
++    }
++
++    // the loader is no longer needed, the application will load it again for its own instance
++    this->shutdown();
+     m_initializedInsExt = true;
+   }
+ 
+@@ -69,16 +173,126 @@ namespace dxvk {
+   }
+ 
+ 
++  bool DxvkXrProvider::queryNativeRuntime() {
++    auto xrGetInstanceProcAddr = reinterpret_cast<oxr::PFN_xrGetInstanceProcAddr>(
++      ::GetProcAddress(m_oxrLoader, "xrGetInstanceProcAddr"));
++
++    if (!xrGetInstanceProcAddr) {
++      Logger::warn("OpenXR: xrGetInstanceProcAddr not found in openxr_loader.dll");
++      return false;
++    }
++
++    oxr::PFN_xrCreateInstance  xrCreateInstance  = nullptr;
++    oxr::PFN_xrDestroyInstance xrDestroyInstance = nullptr;
++    oxr::PFN_xrGetSystem       xrGetSystem       = nullptr;
++
++    xrGetInstanceProcAddr(0, "xrCreateInstance",  reinterpret_cast<oxr::PFN_xrVoidFunction*>(&xrCreateInstance));
++    xrGetInstanceProcAddr(0, "xrDestroyInstance", reinterpret_cast<oxr::PFN_xrVoidFunction*>(&xrDestroyInstance));
++    xrGetInstanceProcAddr(0, "xrGetSystem",       reinterpret_cast<oxr::PFN_xrVoidFunction*>(&xrGetSystem));
++
++    if (!xrCreateInstance || !xrDestroyInstance || !xrGetSystem) {
++      Logger::warn("OpenXR: Loader entry points not found");
++      return false;
++    }
++
++    // A throwaway instance: XR_KHR_vulkan_enable is the extension that knows about Vulkan requirements
++    const char* extensions[] = { "XR_KHR_vulkan_enable" };
++
++    oxr::XrInstanceCreateInfo createInfo = { };
++    createInfo.type = oxr::XR_TYPE_INSTANCE_CREATE_INFO;
++    std::strncpy(createInfo.applicationInfo.applicationName, env::getExeName().c_str(), sizeof(createInfo.applicationInfo.applicationName) - 1);
++    createInfo.applicationInfo.applicationVersion = 1;
++    std::strncpy(createInfo.applicationInfo.engineName, "DXVK", sizeof(createInfo.applicationInfo.engineName) - 1);
++    createInfo.applicationInfo.engineVersion = 1;
++    createInfo.applicationInfo.apiVersion = oxr::XR_API_VERSION_1_0;
++    createInfo.enabledExtensionCount = 1;
++    createInfo.enabledExtensionNames = extensions;
++
++    oxr::XrInstance instance = 0;
++    oxr::XrResult res = xrCreateInstance(&createInfo, &instance);
++
++    if (res != oxr::XR_SUCCESS || !instance) {
++      Logger::warn(str::format("OpenXR: xrCreateInstance failed: ", res, " (no runtime, or no XR_KHR_vulkan_enable)"));
++      return false;
++    }
++
++    bool success = false;
++
++    oxr::XrSystemGetInfo systemInfo = { };
++    systemInfo.type = oxr::XR_TYPE_SYSTEM_GET_INFO;
++    systemInfo.formFactor = oxr::XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
++
++    oxr::XrSystemId systemId = 0;
++    res = xrGetSystem(instance, &systemInfo, &systemId);
++
++    if (res != oxr::XR_SUCCESS) {
++      Logger::warn(str::format("OpenXR: xrGetSystem failed: ", res, " (is the headset connected?)"));
++    } else {
++      oxr::PFN_xrGetVulkanExtensions xrGetVulkanInstanceExtensionsKHR = nullptr;
++      oxr::PFN_xrGetVulkanExtensions xrGetVulkanDeviceExtensionsKHR   = nullptr;
++
++      xrGetInstanceProcAddr(instance, "xrGetVulkanInstanceExtensionsKHR", reinterpret_cast<oxr::PFN_xrVoidFunction*>(&xrGetVulkanInstanceExtensionsKHR));
++      xrGetInstanceProcAddr(instance, "xrGetVulkanDeviceExtensionsKHR",   reinterpret_cast<oxr::PFN_xrVoidFunction*>(&xrGetVulkanDeviceExtensionsKHR));
++
++      if (!xrGetVulkanInstanceExtensionsKHR || !xrGetVulkanDeviceExtensionsKHR) {
++        Logger::warn("OpenXR: xrGetVulkan*ExtensionsKHR not found");
++      } else {
++        auto query = [&] (oxr::PFN_xrGetVulkanExtensions fn, const char* what, DxvkExtensionList& result) {
++          uint32_t len = 0;
++          oxr::XrResult r = fn(instance, systemId, 0, &len, nullptr);
++
++          if (r != oxr::XR_SUCCESS) {
++            Logger::warn(str::format("OpenXR: Unable to get required Vulkan ", what, " extensions size: ", r));
++            return false;
++          }
++
++          std::vector<char> extensionList(len + 1, '\0');
++          r = fn(instance, systemId, len, &len, extensionList.data());
++
++          if (r != oxr::XR_SUCCESS) {
++            Logger::warn(str::format("OpenXR: Unable to get required Vulkan ", what, " extensions: ", r));
++            return false;
++          }
++
++          result = parseExtensionList(std::string(extensionList.data()));
++          return true;
++        };
++
++        success = query(xrGetVulkanInstanceExtensionsKHR, "instance", m_insExtensions)
++               && query(xrGetVulkanDeviceExtensionsKHR,   "device",   m_devExtensions);
++      }
++    }
++
++    xrDestroyInstance(instance);
++
++    if (!success) {
++      m_insExtensions.clear();
++      m_devExtensions.clear();
++    }
++
++    return success;
++  }
++
++
+   void DxvkXrProvider::initDeviceExtensions(const DxvkInstance* instance) {
+     std::lock_guard<dxvk::mutex> lock(m_mutex);
+ 
+-    if (!m_wineOxr || m_initializedDevExt)
++    if (m_initializedDevExt)
+       return;
+-    
+-    m_devExtensions = this->queryDeviceExtensions();
+-    m_initializedDevExt = true;
+ 
+-    this->shutdown();
++    if (m_wineOxr) {
++      m_devExtensions = this->queryDeviceExtensions();
++      m_initializedDevExt = true;
++      this->shutdown();
++      return;
++    }
++
++    // Windows: the lists were fetched together with the instance extensions; drop whatever a GPU does not
++    // offer, a missing extension would otherwise fail vkCreateDevice and take the whole game down with it
++    for (uint32_t i = 0; instance->enumAdapters(i) != nullptr; i++)
++      m_devExtensionsPerAdapter.push_back(this->filterSupportedDeviceExtensions(instance, i, m_devExtensions));
++
++    m_initializedDevExt = true;
+   }
+ 
+ 
+@@ -101,8 +315,8 @@ namespace dxvk {
+ 
+     return parseExtensionList(std::string(extensionList.data(), len));
+   }
+-  
+-  
++
++
+   DxvkExtensionList DxvkXrProvider::queryDeviceExtensions() const {
+     int res;
+ 
+@@ -122,27 +336,113 @@ namespace dxvk {
+ 
+     return parseExtensionList(std::string(extensionList.data(), len));
+   }
+-  
+-  
++
++
+   DxvkExtensionList DxvkXrProvider::parseExtensionList(const std::string& str) const {
+     DxvkExtensionList result;
+-    
++
+     std::stringstream strstream(str);
+     std::string       section;
+-    
+-    while (std::getline(strstream, section, ' '))
+-      result.push_back(vk::makeExtension(section.c_str()));
+-    
++
++    while (std::getline(strstream, section, ' ')) {
++      // the lists come back NUL-terminated and may carry stray whitespace
++      while (!section.empty() && (section.back() == '\0' || section.back() == ' ' || section.back() == '\n' || section.back() == '\r'))
++        section.pop_back();
++
++      if (!section.empty())
++        result.push_back(vk::makeExtension(section.c_str()));
++    }
++
++    return result;
++  }
++
++
++  DxvkExtensionList DxvkXrProvider::filterSupportedInstanceExtensions(const DxvkExtensionList& requested) const {
++    // vulkan-1.dll is already loaded by DxvkInstance at this point
++    HMODULE vulkan = ::GetModuleHandleA("vulkan-1.dll");
++
++    auto vkEnumerateInstanceExtensionProperties = vulkan
++      ? reinterpret_cast<PFN_vkEnumerateInstanceExtensionProperties>(::GetProcAddress(vulkan, "vkEnumerateInstanceExtensionProperties"))
++      : nullptr;
++
++    if (!vkEnumerateInstanceExtensionProperties)
++      return requested;
++
++    uint32_t count = 0;
++    if (vkEnumerateInstanceExtensionProperties(nullptr, &count, nullptr) != VK_SUCCESS)
++      return requested;
++
++    std::vector<VkExtensionProperties> supported(count);
++    if (vkEnumerateInstanceExtensionProperties(nullptr, &count, supported.data()) != VK_SUCCESS)
++      return requested;
++
++    DxvkExtensionList result;
++
++    for (const auto& ext : requested) {
++      bool found = false;
++
++      for (const auto& s : supported) {
++        if ((found = !std::strncmp(ext.extensionName, s.extensionName, sizeof(s.extensionName))))
++          break;
++      }
++
++      if (found)
++        result.push_back(ext);
++      else
++        Logger::warn(str::format("OpenXR: Instance extension ", ext.extensionName, " not supported, skipping"));
++    }
++
++    return result;
++  }
++
++
++  DxvkExtensionList DxvkXrProvider::filterSupportedDeviceExtensions(
++    const DxvkInstance*       instance,
++          uint32_t            adapterId,
++    const DxvkExtensionList&  requested) const {
++    Rc<DxvkAdapter> adapter = instance->enumAdapters(adapterId);
++    auto vki = instance->vki();
++
++    uint32_t count = 0;
++    if (vki->vkEnumerateDeviceExtensionProperties(adapter->handle(), nullptr, &count, nullptr) != VK_SUCCESS)
++      return requested;
++
++    std::vector<VkExtensionProperties> supported(count);
++    if (vki->vkEnumerateDeviceExtensionProperties(adapter->handle(), nullptr, &count, supported.data()) != VK_SUCCESS)
++      return requested;
++
++    DxvkExtensionList result;
++
++    for (const auto& ext : requested) {
++      bool found = false;
++
++      for (const auto& s : supported) {
++        if ((found = !std::strncmp(ext.extensionName, s.extensionName, sizeof(s.extensionName))))
++          break;
++      }
++
++      if (found)
++        result.push_back(ext);
++      else
++        Logger::warn(str::format("OpenXR: Device extension ", ext.extensionName, " not supported by adapter ", adapterId, ", skipping"));
++    }
++
+     return result;
+   }
+-  
+-  
++
++
+   void DxvkXrProvider::shutdown() {
+     if (m_loadedOxrApi)
+       this->freeLibrary();
+-    
++
++    // The native loader stays loaded on purpose: the application is going to load it again for its own
++    // instance in a moment, and unloading a loader that already pulled in the runtime's libraries is
++    // something not every runtime survives.
++
+     m_loadedOxrApi      = false;
+-    m_wineOxr = nullptr;
++    m_loadedOxrLoader   = false;
++    m_wineOxr           = nullptr;
++    m_oxrLoader         = nullptr;
+   }
+ 
+ 
+@@ -154,11 +454,23 @@ namespace dxvk {
+   }
+ 
+ 
++  HMODULE DxvkXrProvider::loadNativeLoader() {
++    // only if the application brought its own loader (next to the executable), never one from the system
++    HMODULE handle = nullptr;
++
++    if (!::GetModuleHandleEx(0, "openxr_loader.dll", &handle))
++      handle = ::LoadLibraryEx("openxr_loader.dll", nullptr, LOAD_LIBRARY_SEARCH_APPLICATION_DIR);
++
++    m_loadedOxrLoader = handle != nullptr;
++    return handle;
++  }
++
++
+   void DxvkXrProvider::freeLibrary() {
+     ::FreeLibrary(m_wineOxr);
+   }
+ 
+-  
++
+   void* DxvkXrProvider::getSym(const char* sym) {
+     return reinterpret_cast<void*>(
+       ::GetProcAddress(m_wineOxr, sym));
+diff --git a/src/dxvk/dxvk_openxr.h b/src/dxvk/dxvk_openxr.h
+index de18b0a8..2ee40138 100644
+--- a/src/dxvk/dxvk_openxr.h
++++ b/src/dxvk/dxvk_openxr.h
+@@ -11,13 +11,21 @@ namespace dxvk {
+ 
+   /**
+    * \brief OpenXR instance
+-   * 
++   *
+    * Loads OpenXR to provide access to Vulkan extension queries.
++   *
++   * Two ways in: under Wine, wineopenxr.dll exports the lists directly.
++   * On Windows, the OpenXR loader (openxr_loader.dll, found next to the
++   * game when a VR mod ships it) is asked instead: a temporary XrInstance
++   * with XR_KHR_vulkan_enable is created, the active runtime names the
++   * Vulkan instance and device extensions it needs, and the instance is
++   * destroyed again before the application creates its own.
++   * DXVK_OPENXR=0 disables the Windows path.
+    */
+   class DxvkXrProvider : public DxvkExtensionProvider {
+-    
++
+   public:
+-    
++
+     DxvkXrProvider();
+     ~DxvkXrProvider();
+ 
+@@ -27,7 +35,7 @@ namespace dxvk {
+ 
+     DxvkExtensionList getDeviceExtensions(
+             uint32_t      adapterId);
+-    
++
+     void initInstanceExtensions();
+ 
+     void initDeviceExtensions(
+@@ -39,31 +47,46 @@ namespace dxvk {
+ 
+     dxvk::mutex           m_mutex;
+     HMODULE               m_wineOxr     = nullptr;
++    HMODULE               m_oxrLoader   = nullptr;
+ 
+     bool m_loadedOxrApi      = false;
++    bool m_loadedOxrLoader   = false;
+     bool m_initializedInsExt = false;
+     bool m_initializedDevExt = false;
+ 
+     DxvkExtensionList m_insExtensions;
+     DxvkExtensionList m_devExtensions;
+-    
++    std::vector<DxvkExtensionList> m_devExtensionsPerAdapter;
++
+     DxvkExtensionList queryInstanceExtensions() const;
+ 
+     DxvkExtensionList queryDeviceExtensions() const;
+ 
+     DxvkExtensionList parseExtensionList(
+       const std::string&              str) const;
+-    
++
++    DxvkExtensionList filterSupportedInstanceExtensions(
++      const DxvkExtensionList&        requested) const;
++
++    DxvkExtensionList filterSupportedDeviceExtensions(
++      const DxvkInstance*             instance,
++            uint32_t                  adapterId,
++      const DxvkExtensionList&        requested) const;
++
+     bool loadFunctions();
+ 
++    bool queryNativeRuntime();
++
+     void shutdown();
+ 
+     HMODULE loadLibrary();
+ 
++    HMODULE loadNativeLoader();
++
+     void freeLibrary();
+ 
+     void* getSym(const char* sym);
+-    
++
+   };
+-  
++
+ }
+-- 
+2.43.0
+

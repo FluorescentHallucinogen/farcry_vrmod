@@ -50,6 +50,12 @@ jobs:
         with:
           architecture: x86
 
+      # the mod's dxvk changes that are not in fholger/dxvkry yet (see Sources/ThirdParty/dxvk-patches)
+      - name: Patch dxvk
+        working-directory: "Sources/ThirdParty/dxvk"
+        shell: bash
+        run: git apply --verbose ../dxvk-patches/*.patch
+
       - name: Prepare dxvk build
         working-directory: "Sources/ThirdParty/dxvk"
         shell: cmd
@@ -64,6 +70,15 @@ jobs:
       - name: Build CryGame
         working-directory: "Sources/CryGame C++/Solution1"
         run: msbuild Solution1.sln /p:Configuration=Release -m
+
+      # FarCryVR.exe is built from source so the environment it hands to dxvk always matches
+      # Sources/Launcher/src/main.rs (the FarCryVR.exe checked in at the repository root is a stale fallback)
+      - name: Setup Rust (for the launcher)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build launcher
+        working-directory: "Sources/Launcher"
+        run: cargo build --release
 
       - name: Create installer
         working-directory: installer

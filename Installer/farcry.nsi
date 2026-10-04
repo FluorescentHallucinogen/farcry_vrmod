@@ -42,6 +42,10 @@ It features a full roomscale VR experience with motion controller support.'
 
 Section "!Mod files"
 	SectionIn RO
+	; leftovers of the OpenVR / SteamVR based versions: dxvk would still pick up a stray openvr_api.dll
+	Delete "$INSTDIR\Bin32\openvr_api.dll"
+	RMDir /r "$INSTDIR\Mods\CryVR\steamvr"
+
 	SetOutPath $INSTDIR\Mods\CryVR
 	File /r .\assembly\Mods\CryVR\*
 
