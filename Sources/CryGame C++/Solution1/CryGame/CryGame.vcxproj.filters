@@ -396,6 +396,12 @@
     <ClCompile Include="VRManager.cpp">
       <Filter>Source Files\VR</Filter>
     </ClCompile>
+    <ClCompile Include="VROpenXR.cpp">
+      <Filter>Source Files\VR</Filter>
+    </ClCompile>
+    <ClCompile Include="DxvkInterop.cpp">
+      <Filter>Source Files\VR</Filter>
+    </ClCompile>
     <ClCompile Include="VRRenderer.cpp">
       <Filter>Source Files\VR</Filter>
     </ClCompile>
@@ -1044,6 +1050,12 @@
       <Filter>Source Files\VR</Filter>
     </ClInclude>
     <ClInclude Include="VRManager.h">
+      <Filter>Source Files\VR</Filter>
+    </ClInclude>
+    <ClInclude Include="VROpenXR.h">
+      <Filter>Source Files\VR</Filter>
+    </ClInclude>
+    <ClInclude Include="DxvkInterop.h">
       <Filter>Source Files\VR</Filter>
     </ClInclude>
     <ClInclude Include="VRRenderer.h">

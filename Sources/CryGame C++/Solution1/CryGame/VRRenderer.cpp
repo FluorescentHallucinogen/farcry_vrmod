@@ -5,6 +5,7 @@
 #include "Game.h"
 #include "Hooks.h"
 #include "VRManager.h"
+#include "DxvkInterop.h"
 #include <d3d9.h>
 
 #include "WeaponClass.h"
@@ -15,6 +16,14 @@
 namespace
 {
 	VRRenderer g_vrRendererImpl;
+
+	// The engine's renderer creates the D3D9 device long before this DLL is loaded, so we cannot hook its creation
+	// ourselves. The Far Cry VR build of dxvk (Sources/ThirdParty/dxvk) remembers the device it created and hands it
+	// out through an export.
+	IDirect3DDevice9Ex* GetGameDevice()
+	{
+		return dxvk::GetCreatedDevice();
+	}
 }
 
 VRRenderer* gVRRenderer = &g_vrRendererImpl;
@@ -58,18 +67,14 @@ void __fastcall Hook_Renderer_SetCamera(IRenderer* pSelf, void* notUsed, const C
 	hooks::CallOriginal(Hook_Renderer_SetCamera)(pSelf, notUsed, cc);
 }
 
-extern "C" {
-  __declspec(dllimport) IDirect3DDevice9Ex* dxvkGetCreatedDevice();
-}
-
 void VRRenderer::Init(CXGame *game)
 {
 	m_pGame = game;
 
-	IDirect3DDevice9Ex* device = dxvkGetCreatedDevice();
+	IDirect3DDevice9Ex* device = GetGameDevice();
 	if (!device)
 	{
-		CryLogAlways("Could not get d3d9 device from dxvk");
+		CryLogAlways("Could not get d3d9 device from dxvk (is the Far Cry VR d3d9.dll installed in Bin32?)");
 		return;
 	}
 
@@ -88,7 +93,7 @@ void VRRenderer::Render(ISystem* pSystem)
 {
 	m_originalViewCamera = pSystem->GetViewCamera();
 
-	gVR->SetDevice(dxvkGetCreatedDevice());
+	gVR->SetDevice(GetGameDevice());
 	gVR->AwaitFrame();
 
 	if (CPlayer* player = m_pGame->GetLocalPlayer())
@@ -104,7 +109,8 @@ void VRRenderer::Render(ISystem* pSystem)
 	vector2di renderSize = gVR->GetRenderSize();
 	m_pGame->m_pRenderer->SetScissor(0, 0, renderSize.x, renderSize.y);
 	// clear render target to fully transparent for HUD render
-	dxvkGetCreatedDevice()->Clear(0, nullptr, D3DCLEAR_TARGET, D3DCOLOR_ARGB(0, 0, 0, 0), 0, 0);
+	if (IDirect3DDevice9Ex* device = GetGameDevice())
+		device->Clear(0, nullptr, D3DCLEAR_TARGET, D3DCOLOR_ARGB(0, 0, 0, 0), 0, 0);
 
 	if (ShouldRender2D())
 	{
@@ -130,7 +136,8 @@ void VRRenderer::Render(ISystem* pSystem)
 				gVR->CaptureStereo(eye);
 			}
 			// clear render target to fully transparent for HUD render
-			dxvkGetCreatedDevice()->Clear(0, nullptr, D3DCLEAR_TARGET, D3DCOLOR_ARGB(0, 0, 0, 0), 0, 0);
+			if (IDirect3DDevice9Ex* device = GetGameDevice())
+				device->Clear(0, nullptr, D3DCLEAR_TARGET, D3DCOLOR_ARGB(0, 0, 0, 0), 0, 0);
 		}
 		else
 		{

@@ -1,7 +1,5 @@
 #pragma once
-#include <openvr.h>
-#include <vulkan/vulkan_core.h>
-
+#include "VROpenXR.h"
 #include "VRHaptics.h"
 #include "VRInput.h"
 
@@ -9,12 +7,14 @@
 
 class CWeaponClass;
 class CXGame;
-class IDirect3DDevice9Ex;
-class IDirect3DTexture9;
+struct IDirect3DDevice9Ex;
+struct IDirect3DTexture9;
 
-Matrix34 OpenVRToFarCry(const vr::HmdMatrix34_t& mat);
+// OpenXR (like OpenVR): x = right, y = up, -z = forward; FarCry: x = left, -y = forward, z = up
+Matrix34 XrPoseToFarCry(const XrPosef& pose);
+XrPosef FarCryToXrPose(const Matrix34& mat);
 
-class VRManager
+class VRManager : private IQueueLock
 {
 public:
 	VRManager();
@@ -75,21 +75,47 @@ public:
 private:
 	struct D3DResources;
 
+	// where the HUD quad (menu, ingame HUD, binoculars, weapon scope) is shown this frame
+	struct HudPlacement
+	{
+		bool headLocked = true;      // pose relative to the head instead of the tracking space
+		XrPosef pose;                // quad center, +Z towards the viewer
+		float width = 2.0f;          // meters
+		bool opaque = false;         // ignore the texture's alpha
+	};
+
 	CXGame* m_pGame;
 	bool m_initialized = false;
 	bool m_inputReady = false;
 	D3DResources* m_d3d = nullptr;
-	vr::TrackedDevicePose_t m_headPose;
-	vr::VROverlayHandle_t m_hudOverlay;
-	vr::VROverlayHandle_t m_3DOverlay;
-	float m_verticalFov;
+	VROpenXR m_xr;
+	XrPosef m_headPoseXr;          // raw head pose in the OpenXR stage space, from the last AwaitFrame
+	bool m_headPoseValid = false;
+	bool m_recalibratePending = false;
+	float m_verticalFov;           // tangents of the half angles the eyes are rendered with (symmetric)
 	float m_horizontalFov;
 	float m_vertRenderScale;
 	float m_horzRenderScale;
+	bool m_fovKnown = false;
 	float m_prevViewYaw = 0;
 
 	int m_curWindowWidth = 0;
 	int m_curWindowHeight = 0;
+
+	HudPlacement m_hud;
+	bool m_stereoVisible = false;  // show the side-by-side 3D cinema quads (same placement as the HUD)
+
+	// menu pointer: a ray from the pointing hand hits the menu quad and moves the mouse cursor there
+	int m_pointerHand = 1;
+	bool m_pointerVisible = false;
+	bool m_pointerValid = false;
+	float m_pointerU = 0.5f;       // cursor on the menu quad, 0..1 from the left / from the top
+	float m_pointerV = 0.5f;
+	XrVector3f m_pointerHit;       // where the ray meets the menu quad (stage space)
+	bool m_menuTriggerDown[2] = {};
+	bool m_menuClickDown = false;
+	bool m_menuAnyButtonDown = false;
+	float m_lastStandaloneFrameTime = 0;   // last frame submitted without VRRenderer (loading screens)
 
 	void SetHudAttachedToHead();
 	void SetHudInFrontOfPlayer();
@@ -101,8 +127,33 @@ private:
 	void CreateHUDTexture();
 	void CreateStereoTexture();
 
-	void PrepareTextureForSubmission(IDirect3DTexture9* tex, vr::VRVulkanTextureData_t& vrTexData, VkImageLayout& origLayout);
-	void PostSubmissionTransitionTexture(IDirect3DTexture9* tex, VkImageLayout origLayout);
+	// Creates a render target on the game's D3D9 device, in the channel order of the OpenXR swapchains so the
+	// frames can be copied over 1:1. The pointer is owned by the caller.
+	bool CreateRenderTarget(int width, int height, const char* name, IDirect3DTexture9** ppTexture);
+
+	// Asks dxvk for the Vulkan objects behind its D3D9 device (the OpenXR session is created on them).
+	bool QueryVulkanDevice(IDirect3DDevice9Ex* device, VROpenXR::VulkanDevice& vulkanDevice);
+
+	// A texture on its way to OpenXR: the Vulkan image dxvk keeps behind it, moved into the copy source layout
+	// (dxvk records the transition into its command stream, so it has to happen before the stream is flushed).
+	struct SubmissionImage
+	{
+		VROpenXR::SourceImage source;
+		VkImageLayout originalLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		IDirect3DTexture9* texture = nullptr;   // not owned
+	};
+	bool PrepareTextureForSubmission(IDirect3DTexture9* texture, SubmissionImage& image);
+	void PostSubmissionTransitionTexture(SubmissionImage& image);
+
+	// IQueueLock: keeps dxvk off its graphics queue while OpenXR (and our copies) use it
+	virtual void LockQueue(bool flushPending);
+	virtual void UnlockQueue();
+
+	void UpdateFovFromRuntime();
+	void UpdateMenuPointer();
+	bool BuildBeamQuad(const XrVector3f& from, const XrVector3f& to, float width, const XrVector3f& eye, VROpenXR::QuadLayer& quad);
+	bool BuildFaceQuad(const XrVector3f& center, const XrVector3f& x, const XrVector3f& y, const XrVector3f& normal, float w, float h, const XrVector3f& eye, VROpenXR::QuadLayer& quad);
+	int BuildPointerQuads(VROpenXR::QuadLayer* quads, int maxQuads);
 
 public:
 	// VR-specific cvars
@@ -138,6 +189,8 @@ public:
 	float vr_menu_width;
 	int vr_skip_vehicle_transitions;
 	int vr_decouple_vehicle_rotations;
+	int vr_vehicle_alt_controls;
+	int vr_menu_pointer;
 	ICVar* vr_debug_override_rh_offset = nullptr;
 	ICVar* vr_debug_override_rh_angles = nullptr;
 	ICVar* vr_debug_override_lh_offset = nullptr;

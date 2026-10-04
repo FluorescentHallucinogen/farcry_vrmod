@@ -2,7 +2,7 @@
 #include "Cry_Camera.h"
 
 class CXGame;
-class IDirect3DDevice9Ex;
+struct IDirect3DDevice9Ex;
 
 class VRRenderer
 {

@@ -21,7 +21,6 @@ fn main() {
         .args(&args)
         .env("DXVK_ASYNC", "0")
         .env("DXVK_GPLASYNCCACHE", "0")
-        .env("DXVK_STARTOPENVR", "1")
         .current_dir(install_dir.join("Bin32"))
         .creation_flags(0x200)
         .spawn()

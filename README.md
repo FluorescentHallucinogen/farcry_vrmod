@@ -35,9 +35,9 @@ Some more advanced config options are only available through the console or the 
 
 ## Playing
 
-This mod requires SteamVR. If you have any issues, ensure that SteamVR is already running and working with your headset before launching the game.
+This mod talks to your headset through OpenXR. The game renders through dxvk (Direct3D 9 translated to Vulkan), and the frames are handed to the headset as Vulkan images, so the OpenXR runtime has to support Vulkan (`XR_KHR_vulkan_enable`): SteamVR, Meta Quest Link / Air Link and Virtual Desktop (VDXR) do; Windows Mixed Reality does not. Make sure the runtime of your headset is set as the active OpenXR runtime (each runtime offers a button for that in its settings). If you have any issues, ensure that the runtime is already running and working with your headset before launching the game.
 
-Refer to the [manual](https://farcryvr.de/manual/) for the default controller bindings. Index and Touch-like controllers are supported out of the box. Any other controller type may require you to create your own custom controller bindings for the game.
+Refer to the [manual](https://farcryvr.de/manual/) for the controller bindings. Touch-like controllers (Quest, Pico, Reverb G2, Vive Cosmos and Focus), Valve Index, Vive wands and Windows Mixed Reality controllers are supported out of the box; the bindings are built into the mod. The console variable `vr_vehicle_alt_controls 1` selects the alternative vehicle controls (triggers accelerate and brake), `vr_menu_pointer 0` hides the controller pointer in menus.
 
 ## Known issues / limitations
 
