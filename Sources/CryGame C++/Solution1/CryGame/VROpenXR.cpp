@@ -721,7 +721,40 @@ bool VROpenXR::CheckVulkanRequirements()
 			if (!found)
 				CryLogAlways("OpenXR: WARNING: the GPU does not offer %s, which the runtime asks for", required[r].c_str());
 		}
-		CryLogAlways("OpenXR: note: dxvk 2.7 enables VK_KHR_external_memory_win32 and VK_KHR_external_semaphore_win32 when the GPU has them; anything else the runtime needs beyond Vulkan 1.3 core is not enabled on its device");
+
+		// Whether dxvk *enabled* an extension cannot be asked of Vulkan directly, but a device-level entry point of an
+		// extension that is not enabled resolves to null - and that null is exactly what the runtime would end up
+		// calling inside xrCreateSession (a crash with no message). Probe the extensions that have entry points and
+		// are not part of Vulkan 1.3 core; stop here with a readable error instead.
+		struct Probe { const char* extension; const char* function; };
+		const Probe probes[] =
+		{
+			{ "VK_KHR_external_memory_win32",    "vkGetMemoryWin32HandleKHR" },
+			{ "VK_KHR_external_semaphore_win32", "vkGetSemaphoreWin32HandleKHR" },
+			{ "VK_KHR_external_fence_win32",     "vkGetFenceWin32HandleKHR" },
+			{ "VK_KHR_external_memory_fd",       "vkGetMemoryFdKHR" },
+			{ "VK_KHR_external_semaphore_fd",    "vkGetSemaphoreFdKHR" },
+			{ "VK_KHR_external_fence_fd",        "vkGetFenceFdKHR" },
+		};
+		bool missing = false;
+		for (size_t r = 0; r < required.size(); ++r)
+		{
+			for (size_t p = 0; p < sizeof(probes) / sizeof(probes[0]); ++p)
+			{
+				if (required[r] != probes[p].extension)
+					continue;
+				if (!m_fn.vkGetDeviceProcAddr(m_vk.device, probes[p].function))
+				{
+					CryLogAlways("OpenXR: ERROR: the runtime needs %s, but dxvk did not enable it on its Vulkan device", required[r].c_str());
+					missing = true;
+				}
+			}
+		}
+		if (missing)
+		{
+			CryLogAlways("OpenXR: dxvk enables the runtime's extensions through its OpenXR extension provider (Sources/ThirdParty/dxvk-patches); check the 'OpenXR:' lines in Bin32\\FarCry_d3d9.log for why that did not happen");
+			return false;
+		}
 	}
 
 	// the GPU the runtime renders on has to be the one dxvk picked

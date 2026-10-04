@@ -1,4 +1,4 @@
-From 5dc65bb4f5cadbf6a1982dfcf6275aca5ffb0b74 Mon Sep 17 00:00:00 2001
+From e623839be96eeb74947554e7360ebcb9ab410762 Mon Sep 17 00:00:00 2001
 From: Alexey Rodionov <fluorescent.hallucinogen@gmail.com>
 Date: Sun, 4 Oct 2026 12:22:48 +0000
 Subject: [PATCH] [dxvk] Ask the OpenXR runtime for Vulkan extensions on
@@ -20,12 +20,12 @@ Windows path off.
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01TWsKJPmuvTXK3Vo9GTKHQd
 ---
- src/dxvk/dxvk_openxr.cpp | 366 ++++++++++++++++++++++++++++++++++++---
- src/dxvk/dxvk_openxr.h   |  39 ++++-
- 2 files changed, 370 insertions(+), 35 deletions(-)
+ src/dxvk/dxvk_openxr.cpp | 388 ++++++++++++++++++++++++++++++++++++---
+ src/dxvk/dxvk_openxr.h   |  39 +++-
+ 2 files changed, 392 insertions(+), 35 deletions(-)
 
 diff --git a/src/dxvk/dxvk_openxr.cpp b/src/dxvk/dxvk_openxr.cpp
-index 9b304d81..d4938c60 100644
+index 9b304d81..a0f5971f 100644
 --- a/src/dxvk/dxvk_openxr.cpp
 +++ b/src/dxvk/dxvk_openxr.cpp
 @@ -1,6 +1,15 @@
@@ -168,19 +168,19 @@ index 9b304d81..d4938c60 100644
 +    if (env::getEnvVar("DXVK_OPENXR") == "0") {
 +      Logger::info("OpenXR: Disabled by DXVK_OPENXR=0");
 +      m_initializedInsExt = true;
-+      return;
-+    }
-+
+       return;
+     }
+ 
+-    m_insExtensions = this->queryInstanceExtensions();
 +    if (!m_oxrLoader)
 +      m_oxrLoader = this->loadNativeLoader();
 +
 +    if (!m_oxrLoader) {
 +      Logger::info("OpenXR: Failed to locate module");
 +      m_initializedInsExt = true;
-       return;
-     }
- 
--    m_insExtensions = this->queryInstanceExtensions();
++      return;
++    }
++
 +    if (this->queryNativeRuntime()) {
 +      m_insExtensions = this->filterSupportedInstanceExtensions(m_insExtensions);
 +
@@ -198,7 +198,7 @@ index 9b304d81..d4938c60 100644
      m_initializedInsExt = true;
    }
  
-@@ -69,16 +173,126 @@ namespace dxvk {
+@@ -69,16 +173,148 @@ namespace dxvk {
    }
  
  
@@ -211,16 +211,20 @@ index 9b304d81..d4938c60 100644
 +      return false;
 +    }
 +
++    // Without an instance, xrGetInstanceProcAddr only hands out xrCreateInstance (and the enumerate
++    // functions); everything else is looked up once the instance exists. The loader also exports the
++    // core functions directly, which serves as a fallback.
 +    oxr::PFN_xrCreateInstance  xrCreateInstance  = nullptr;
 +    oxr::PFN_xrDestroyInstance xrDestroyInstance = nullptr;
 +    oxr::PFN_xrGetSystem       xrGetSystem       = nullptr;
 +
-+    xrGetInstanceProcAddr(0, "xrCreateInstance",  reinterpret_cast<oxr::PFN_xrVoidFunction*>(&xrCreateInstance));
-+    xrGetInstanceProcAddr(0, "xrDestroyInstance", reinterpret_cast<oxr::PFN_xrVoidFunction*>(&xrDestroyInstance));
-+    xrGetInstanceProcAddr(0, "xrGetSystem",       reinterpret_cast<oxr::PFN_xrVoidFunction*>(&xrGetSystem));
++    xrGetInstanceProcAddr(0, "xrCreateInstance", reinterpret_cast<oxr::PFN_xrVoidFunction*>(&xrCreateInstance));
 +
-+    if (!xrCreateInstance || !xrDestroyInstance || !xrGetSystem) {
-+      Logger::warn("OpenXR: Loader entry points not found");
++    if (!xrCreateInstance)
++      xrCreateInstance = reinterpret_cast<oxr::PFN_xrCreateInstance>(::GetProcAddress(m_oxrLoader, "xrCreateInstance"));
++
++    if (!xrCreateInstance) {
++      Logger::warn("OpenXR: xrCreateInstance not found");
 +      return false;
 +    }
 +
@@ -242,6 +246,24 @@ index 9b304d81..d4938c60 100644
 +
 +    if (res != oxr::XR_SUCCESS || !instance) {
 +      Logger::warn(str::format("OpenXR: xrCreateInstance failed: ", res, " (no runtime, or no XR_KHR_vulkan_enable)"));
++      return false;
++    }
++
++    xrGetInstanceProcAddr(instance, "xrDestroyInstance", reinterpret_cast<oxr::PFN_xrVoidFunction*>(&xrDestroyInstance));
++    xrGetInstanceProcAddr(instance, "xrGetSystem",       reinterpret_cast<oxr::PFN_xrVoidFunction*>(&xrGetSystem));
++
++    if (!xrDestroyInstance)
++      xrDestroyInstance = reinterpret_cast<oxr::PFN_xrDestroyInstance>(::GetProcAddress(m_oxrLoader, "xrDestroyInstance"));
++    if (!xrGetSystem)
++      xrGetSystem = reinterpret_cast<oxr::PFN_xrGetSystem>(::GetProcAddress(m_oxrLoader, "xrGetSystem"));
++
++    if (!xrDestroyInstance || !xrGetSystem) {
++      Logger::warn("OpenXR: Loader entry points not found");
++
++      // the application needs to be able to create its own instance later
++      if (xrDestroyInstance)
++        xrDestroyInstance(instance);
++
 +      return false;
 +    }
 +
@@ -330,7 +352,7 @@ index 9b304d81..d4938c60 100644
    }
  
  
-@@ -101,8 +315,8 @@ namespace dxvk {
+@@ -101,8 +337,8 @@ namespace dxvk {
  
      return parseExtensionList(std::string(extensionList.data(), len));
    }
@@ -341,7 +363,7 @@ index 9b304d81..d4938c60 100644
    DxvkExtensionList DxvkXrProvider::queryDeviceExtensions() const {
      int res;
  
-@@ -122,27 +336,113 @@ namespace dxvk {
+@@ -122,27 +358,113 @@ namespace dxvk {
  
      return parseExtensionList(std::string(extensionList.data(), len));
    }
@@ -369,8 +391,10 @@ index 9b304d81..d4938c60 100644
 +        result.push_back(vk::makeExtension(section.c_str()));
 +    }
 +
-+    return result;
-+  }
+     return result;
+   }
+-  
+-  
 +
 +
 +  DxvkExtensionList DxvkXrProvider::filterSupportedInstanceExtensions(const DxvkExtensionList& requested) const {
@@ -443,10 +467,8 @@ index 9b304d81..d4938c60 100644
 +        Logger::warn(str::format("OpenXR: Device extension ", ext.extensionName, " not supported by adapter ", adapterId, ", skipping"));
 +    }
 +
-     return result;
-   }
--  
--  
++    return result;
++  }
 +
 +
    void DxvkXrProvider::shutdown() {
@@ -466,7 +488,7 @@ index 9b304d81..d4938c60 100644
    }
  
  
-@@ -154,11 +454,23 @@ namespace dxvk {
+@@ -154,11 +476,23 @@ namespace dxvk {
    }
  
  
