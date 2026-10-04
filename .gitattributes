@@ -1,0 +1,2 @@
+# patches are applied with git apply and must stay byte-exact (no CRLF conversion on Windows checkouts)
+*.patch -text
